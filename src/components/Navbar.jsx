@@ -9,8 +9,9 @@ const NAV = [
   { id: 'providers', label: 'Providers', Icon: Icons.Puzzle },
 ]
 
-export function Navbar({ page, navigate }) {
+export function Navbar({ page, navigate, theme, toggleTheme }) {
   const { user, logout } = useAuth()
+  const isDark = theme === 'dark'
 
   return (
     <nav className="navbar">
@@ -20,11 +21,7 @@ export function Navbar({ page, navigate }) {
 
       <div className="navbar-links">
         {NAV.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            className={`nav-item ${page === id ? 'active' : ''}`}
-            onClick={() => navigate(id)}
-          >
+          <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => navigate(id)}>
             <span className="nav-item-icon"><Icon /></span>
             <span className="nav-item-label">{label}</span>
           </button>
@@ -32,6 +29,11 @@ export function Navbar({ page, navigate }) {
       </div>
 
       <div className="navbar-user">
+        {/* Theme toggle */}
+        <button className="theme-toggle" onClick={toggleTheme} title="Switch theme">
+          {isDark ? '☀️' : '🌙'}
+        </button>
+
         <div className="user-avatar" title={user?.username}>
           {user?.username?.[0]?.toUpperCase()}
         </div>
