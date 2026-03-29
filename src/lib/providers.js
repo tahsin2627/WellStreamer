@@ -1,218 +1,194 @@
 import { cacheStorage } from './storage.js'
 
-// ── Constants ──────────────────────────────────────────────────────────────
-const MANIFEST_URL =
-  'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/manifest.json'
-const MODULES_BASE =
-  'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
-const BASE_URL_JSON =
-  'https://himanshu8443.github.io/providers/modflix.json'
+const MANIFEST_URL = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/manifest.json'
+const MODULES_BASE = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
+const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
 
-// CORS proxies tried in order
-const CORS_PROXIES = [
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+const PROXIES = [
+  (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u) => `https://thingproxy.freeboard.io/fetch/${u}`,
 ]
 
-// In-memory module code cache (survives the session, no repeated fetches)
 const moduleCodeCache = new Map()
 
-// ── Fetch with CORS fallback ───────────────────────────────────────────────
 async function fetchWithFallback(url, options = {}) {
-  // Try direct first
-  try {
-    const res = await fetch(url, { ...options, mode: 'cors' })
-    if (res.ok) return res
-  } catch (_) { /* fall through */ }
-
-  // Try each CORS proxy
-  for (const makeProxy of CORS_PROXIES) {
+  const { signal, headers = {}, method = 'GET', body } = options
+  const attempts = [
+    () => fetch(url, { method, headers, body, signal, mode: 'cors' }),
+    ...PROXIES.map(p => () => fetch(p(url), { method, headers, body, signal })),
+  ]
+  let lastErr
+  for (const attempt of attempts) {
     try {
-      const res = await fetch(makeProxy(url), options)
+      const res = await attempt()
       if (res.ok) return res
-    } catch (_) { /* try next */ }
+    } catch (e) {
+      lastErr = e
+      if (signal?.aborted) throw e
+    }
   }
-  throw new Error(`All fetch attempts failed for: ${url}`)
+  throw lastErr || new Error(`Failed: ${url}`)
 }
 
-async function fetchJSON(url, options) {
-  const res = await fetchWithFallback(url, options)
-  return res.json()
-}
+async function fetchText(url, opts) { return (await fetchWithFallback(url, opts)).text() }
+async function fetchJSON(url, opts) { return (await fetchWithFallback(url, opts)).json() }
 
-async function fetchText(url, options) {
-  const res = await fetchWithFallback(url, options)
-  return res.text()
-}
-
-// ── Base URL resolver ──────────────────────────────────────────────────────
 export async function getBaseUrl(providerValue) {
   const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
   if (cached) return cached
-
   try {
     const data = await fetchJSON(BASE_URL_JSON)
-    // Cache ALL provider base URLs in one shot
-    for (const [key, val] of Object.entries(data)) {
-      if (val?.url) cacheStorage.set(`baseUrl_${key}`, val.url, 3_600_000)
+    for (const [k, v] of Object.entries(data)) {
+      if (v?.url) cacheStorage.set(`baseUrl_${k}`, v.url, 3_600_000)
     }
     return data[providerValue]?.url || ''
-  } catch {
-    return ''
-  }
+  } catch { return '' }
 }
 
-// ── Manifest ───────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const cached = cacheStorage.getValid('manifest')
   if (cached) return cached
-
   const data = await fetchJSON(MANIFEST_URL)
   if (!Array.isArray(data)) throw new Error('Invalid manifest')
   cacheStorage.set('manifest', data, 3_600_000)
   return data
 }
 
-// ── Module fetcher ─────────────────────────────────────────────────────────
 async function getModuleCode(providerValue, moduleName) {
   const key = `${providerValue}/${moduleName}`
   if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
-
-  const url = `${MODULES_BASE}/${providerValue}/${moduleName}.js`
-  const code = await fetchText(url)
+  const code = await fetchText(`${MODULES_BASE}/${providerValue}/${moduleName}.js`)
   moduleCodeCache.set(key, code)
   return code
 }
 
-// ── Safe module executor ───────────────────────────────────────────────────
 function runModule(code) {
   const mod = { exports: {} }
   try {
-    // eslint-disable-next-line no-new-func
-    const fn = new Function(
-      'exports', 'module', 'console', 'Promise', 'Object', 'setTimeout', 'clearTimeout',
-      `${code}\nreturn module.exports && Object.keys(module.exports).length ? module.exports : exports;`
-    )
-    const result = fn(mod.exports, mod, console, Promise, Object, setTimeout, clearTimeout)
-    return result || mod.exports
-  } catch (e) {
-    console.warn('Module exec error:', e.message)
-    return mod.exports
-  }
+    const fn = new Function('exports','module','console','Promise','Object','setTimeout','clearTimeout','setInterval','clearInterval',
+      `"use strict";\n${code}\nreturn module.exports&&Object.keys(module.exports).length?module.exports:exports;`)
+    return fn(mod.exports,mod,console,Promise,Object,setTimeout,clearTimeout,setInterval,clearInterval)||mod.exports
+  } catch(e) { console.warn('Module exec:',e.message); return mod.exports }
 }
 
-// ── Provider context (browser-safe axios shim) ─────────────────────────────
-function makeContext() {
-  const axiosLike = {
-    get: async (url, config = {}) => {
-      const res = await fetchWithFallback(url, {
-        headers: config.headers || {},
-        signal: config.signal,
-      })
-      const text = await res.text()
-      let data
-      try { data = JSON.parse(text) } catch { data = text }
-      return { data, status: res.status, headers: Object.fromEntries(res.headers.entries()) }
-    },
-    post: async (url, body, config = {}) => {
-      const res = await fetchWithFallback(url, {
-        method: 'POST',
-        body: typeof body === 'string' ? body : JSON.stringify(body),
-        headers: { 'Content-Type': 'application/json', ...(config.headers || {}) },
-        signal: config.signal,
-      })
-      const text = await res.text()
-      let data
-      try { data = JSON.parse(text) } catch { data = text }
-      return { data, status: res.status }
-    },
-    create: () => axiosLike,
-    defaults: { headers: { common: {} } },
+function makeAxios() {
+  const request = async (urlOrCfg, cfg={}) => {
+    const isStr = typeof urlOrCfg==='string'
+    const url    = isStr?urlOrCfg:urlOrCfg.url
+    const method = ((isStr?cfg.method:urlOrCfg.method)||'GET').toUpperCase()
+    const headers= isStr?(cfg.headers||{}):(urlOrCfg.headers||{})
+    const data   = isStr?cfg.data:urlOrCfg.data
+    const signal = isStr?cfg.signal:urlOrCfg.signal
+    const params = isStr?cfg.params:urlOrCfg.params
+    let finalUrl = url
+    if(params){ const qs=new URLSearchParams(params).toString(); finalUrl=`${url}${url.includes('?')?'&':'?'}${qs}` }
+    const body = data&&typeof data!=='string'?JSON.stringify(data):data
+    const res = await fetchWithFallback(finalUrl,{method,headers,body,signal})
+    const text = await res.text()
+    let respData; try{respData=JSON.parse(text)}catch{respData=text}
+    return {data:respData,status:res.status,statusText:res.statusText,headers:Object.fromEntries(res.headers.entries())}
   }
+  const ax = (u,c)=>request(u,c)
+  ax.get    = (u,c)=>request(u,{...c,method:'GET'})
+  ax.post   = (u,d,c)=>request(u,{...c,method:'POST',data:d})
+  ax.put    = (u,d,c)=>request(u,{...c,method:'PUT',data:d})
+  ax.delete = (u,c)=>request(u,{...c,method:'DELETE'})
+  ax.create = ()=>makeAxios()
+  ax.defaults={headers:{common:{}}}
+  ax.interceptors={request:{use:()=>{},eject:()=>{}},response:{use:()=>{},eject:()=>{}}}
+  return ax
+}
 
+function makeCheerio() {
   return {
-    axios: axiosLike,
+    load: (html) => {
+      try {
+        const doc = new DOMParser().parseFromString(html,'text/html')
+        const wrap = (nodes) => {
+          const o={_n:nodes,length:nodes.length}
+          o.text   =()=>nodes.map(n=>n.textContent).join('')
+          o.html   =()=>nodes.map(n=>n.innerHTML).join('')
+          o.attr   =(a)=>nodes[0]?.getAttribute(a)||''
+          o.val    =()=>nodes[0]?.value||''
+          o.first  =()=>wrap(nodes.slice(0,1))
+          o.last   =()=>wrap(nodes.slice(-1))
+          o.eq     =(i)=>wrap(nodes.slice(i,i+1))
+          o.find   =(s)=>wrap(nodes.flatMap(n=>[...n.querySelectorAll(s)]))
+          o.filter =(s)=>wrap(nodes.filter(n=>n.matches?.(s)))
+          o.children=(s)=>wrap(nodes.flatMap(n=>[...(s?n.querySelectorAll(':scope > '+s):n.children)]))
+          o.parent =()=>wrap(nodes.map(n=>n.parentElement).filter(Boolean))
+          o.next   =()=>wrap(nodes.map(n=>n.nextElementSibling).filter(Boolean))
+          o.prev   =()=>wrap(nodes.map(n=>n.previousElementSibling).filter(Boolean))
+          o.each   =(fn)=>{nodes.forEach((n,i)=>fn(i,n));return o}
+          o.map    =(fn)=>nodes.map((n,i)=>fn(i,n))
+          o.get    =(i)=>i==null?nodes:nodes[i]
+          o.toArray=()=>nodes
+          o.hasClass=(c)=>nodes[0]?.classList.contains(c)||false
+          o.addClass=()=>o; o.remove=()=>{nodes.forEach(n=>n.remove());return o}
+          return o
+        }
+        const $=(s)=>wrap([...doc.querySelectorAll(s)])
+        $.html=()=>doc.documentElement.outerHTML
+        $.text=()=>doc.body?.textContent||''
+        $.root=()=>({find:(s)=>$(s)})
+        return $
+      } catch {
+        const n=()=>n; n.text=()=>''; n.html=()=>''; n.attr=()=>''; n.each=()=>n
+        n.find=()=>n; n.first=()=>n; n.eq=()=>n; n.map=()=>({get:()=>[]}); n.length=0; n.get=()=>[]
+        return n
+      }
+    }
+  }
+}
+
+function makeContext() {
+  return {
+    axios: makeAxios(),
     getBaseUrl,
-    Crypto: {
-      randomUUID: () => crypto.randomUUID(),
-      getRandomValues: (arr) => crypto.getRandomValues(arr),
-    },
-    commonHeaders: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-    // cheerio is a Node.js lib — providers that use it won't work in browser
-    // We stub it so the module at least loads without crashing
-    cheerio: {
-      load: () => {
-        const noop = () => noop
-        noop.text = () => ''
-        noop.html = () => ''
-        noop.attr = () => ''
-        noop.each = () => noop
-        noop.find = () => noop
-        noop.first = () => noop
-        noop.eq = () => noop
-        noop.map = () => ({ get: () => [] })
-        return noop
-      },
-    },
+    Crypto: { randomUUID:()=>crypto.randomUUID(), getRandomValues:(a)=>crypto.getRandomValues(a) },
+    commonHeaders: { 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+    cheerio: makeCheerio(),
     extractors: {
-      hubcloudExtracter: async () => [],
-      gofileExtracter: async () => ({ link: '', token: '' }),
-      superVideoExtractor: async () => '',
-      gdFlixExtracter: async () => [],
+      hubcloudExtracter: async()=>[],
+      gofileExtracter:   async()=>({link:'',token:''}),
+      superVideoExtractor:async()=>'',
+      gdFlixExtracter:   async()=>[],
     },
   }
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
 export async function getCatalog(providerValue) {
-  const code = await getModuleCode(providerValue, 'catalog')
-  const mod = runModule(code)
-  return { catalog: mod.catalog || [], genres: mod.genres || [] }
+  const mod = runModule(await getModuleCode(providerValue,'catalog'))
+  return { catalog:mod.catalog||[], genres:mod.genres||[] }
 }
-
-export async function getPosts({ providerValue, filter, page, signal }) {
-  const code = await getModuleCode(providerValue, 'posts')
-  const mod = runModule(code)
-  if (typeof mod.getPosts !== 'function') throw new Error('No getPosts export')
-  return mod.getPosts({ filter, page, providerValue, signal, providerContext: makeContext() })
+export async function getPosts({providerValue,filter,page,signal}) {
+  const mod = runModule(await getModuleCode(providerValue,'posts'))
+  if(typeof mod.getPosts!=='function') throw new Error('No getPosts')
+  return mod.getPosts({filter,page,providerValue,signal,providerContext:makeContext()})
 }
-
-export async function searchPosts({ providerValue, searchQuery, page, signal }) {
-  const code = await getModuleCode(providerValue, 'posts')
-  const mod = runModule(code)
-  if (typeof mod.getSearchPosts !== 'function') throw new Error('No getSearchPosts export')
-  return mod.getSearchPosts({ searchQuery, page, providerValue, signal, providerContext: makeContext() })
+export async function searchPosts({providerValue,searchQuery,page,signal}) {
+  const mod = runModule(await getModuleCode(providerValue,'posts'))
+  if(typeof mod.getSearchPosts!=='function') throw new Error('No getSearchPosts')
+  return mod.getSearchPosts({searchQuery,page,providerValue,signal,providerContext:makeContext()})
 }
-
-export async function getMeta({ providerValue, link }) {
-  const code = await getModuleCode(providerValue, 'meta')
-  const mod = runModule(code)
-  if (typeof mod.getMeta !== 'function') throw new Error('No getMeta export')
-  return mod.getMeta({ link, provider: providerValue, providerContext: makeContext() })
+export async function getMeta({providerValue,link}) {
+  const mod = runModule(await getModuleCode(providerValue,'meta'))
+  if(typeof mod.getMeta!=='function') throw new Error('No getMeta')
+  return mod.getMeta({link,provider:providerValue,providerContext:makeContext()})
 }
-
-export async function getStream({ providerValue, link, type, signal }) {
-  const code = await getModuleCode(providerValue, 'stream')
-  const mod = runModule(code)
-  if (typeof mod.getStream !== 'function') throw new Error('No getStream export')
-  return mod.getStream({ link, type, signal, providerContext: makeContext() })
+export async function getStream({providerValue,link,type,signal}) {
+  const mod = runModule(await getModuleCode(providerValue,'stream'))
+  if(typeof mod.getStream!=='function') throw new Error('No getStream')
+  return mod.getStream({link,type,signal,providerContext:makeContext()})
 }
-
-export async function getEpisodes({ providerValue, url }) {
+export async function getEpisodes({providerValue,url}) {
   try {
-    const code = await getModuleCode(providerValue, 'episodes')
-    const mod = runModule(code)
-    if (typeof mod.getEpisodes !== 'function') return []
-    return mod.getEpisodes({ url, providerContext: makeContext() })
+    const mod = runModule(await getModuleCode(providerValue,'episodes'))
+    if(typeof mod.getEpisodes!=='function') return []
+    return mod.getEpisodes({url,providerContext:makeContext()})
   } catch { return [] }
 }
-
-// ── Install a provider (pre-warms module cache) ────────────────────────────
 export async function installProvider(providerValue) {
-  // Download all modules in parallel to validate they exist
-  const required = ['catalog', 'posts', 'meta', 'stream']
-  await Promise.all(required.map(m => getModuleCode(providerValue, m)))
+  await Promise.all(['catalog','posts','meta','stream'].map(m=>getModuleCode(providerValue,m)))
 }
