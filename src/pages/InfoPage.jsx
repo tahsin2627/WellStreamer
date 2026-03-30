@@ -1,29 +1,43 @@
 import { useState, useEffect } from 'react'
 import { getMeta, getEpisodes } from '../lib/providers.js'
 import { watchlistStorage, historyStorage } from '../lib/storage.js'
-import { generateAISummary } from '../lib/ai.js'
 import { useAuth } from '../lib/auth.jsx'
 import { Icons } from '../components/Icons.jsx'
+
+// Detect if a linkList item is a movie quality option (not a season)
+function isMovieQuality(linkItem) {
+  if (!linkItem) return false
+  // If it has directLinks where ALL items are type 'movie', it's a movie
+  if (linkItem.directLinks?.length) {
+    return linkItem.directLinks.every(d => d.type === 'movie' || !d.type)
+  }
+  // If it has an episodesLink, it's definitely a series season
+  if (linkItem.episodesLink) return false
+  return false
+}
+
+function extractQuality(title) {
+  if (!title) return null
+  const m = title.match(/(\d{3,4}p|4K|2160p|1080p|720p|480p|360p)/i)
+  return m ? m[1].toUpperCase() : null
+}
 
 export default function InfoPage({ params, navigate }) {
   const { item, providerValue } = params
   const { user } = useAuth()
 
-  const [info, setInfo]           = useState(null)
-  const [linkList, setLinkList]   = useState([])   // all quality/season options
+  const [info, setInfo]               = useState(null)
+  const [linkList, setLinkList]       = useState([])
   const [activeLinkIdx, setActiveLinkIdx] = useState(0)
-  const [episodes, setEpisodes]   = useState([])
-  const [epLoading, setEpLoading] = useState(false)
-  const [loading, setLoading]     = useState(true)
-  const [error, setError]         = useState(null)
-  const [inWL, setInWL]           = useState(() => user ? watchlistStorage.has(user.username, item.link) : false)
-  const [imgErr, setImgErr]       = useState(false)
-  const [aiSummary, setAiSummary] = useState(null)
-  const [aiLoading, setAiLoading] = useState(false)
-  const [aiDone, setAiDone]       = useState(false)
+  const [episodes, setEpisodes]       = useState([])
+  const [epLoading, setEpLoading]     = useState(false)
+  const [loading, setLoading]         = useState(true)
+  const [error, setError]             = useState(null)
+  const [inWL, setInWL]               = useState(() => user ? watchlistStorage.has(user.username, item.link) : false)
+  const [imgErr, setImgErr]           = useState(false)
 
-  // Detect if this is a movie (directLinks) vs series (episodesLink)
-  const isMovie = linkList.length > 0 && !linkList[0]?.episodesLink && linkList[0]?.directLinks?.length > 0 && linkList[0]?.directLinks[0]?.type === 'movie'
+  // Is this content a movie? True when all linkList items are movie quality options
+  const isSeries = linkList.length > 0 && linkList.some(l => l.episodesLink)
 
   useEffect(() => {
     let cancelled = false
@@ -35,7 +49,6 @@ export default function InfoPage({ params, navigate }) {
         setInfo(meta)
         const ll = meta?.linkList || []
         setLinkList(ll)
-        // Auto-load episodes for first link
         if (ll.length > 0) await loadEpisodes(ll[0], cancelled)
       } catch (e) {
         if (!cancelled) setError(e.message)
@@ -52,11 +65,9 @@ export default function InfoPage({ params, navigate }) {
     setEpisodes([])
     try {
       if (linkItem.episodesLink) {
-        // Series — fetch episode list
         const eps = await getEpisodes({ providerValue, url: linkItem.episodesLink })
         if (!cancelled) setEpisodes(eps || [])
       } else if (linkItem.directLinks?.length) {
-        // Movie with direct links — show as single play buttons
         if (!cancelled) setEpisodes(linkItem.directLinks)
       }
     } catch {
@@ -89,173 +100,181 @@ export default function InfoPage({ params, navigate }) {
     })
     navigate('player', {
       link: epLink || item.link,
-      title: epTitle ? `${info?.title || item.title} — ${epTitle}` : (info?.title || item.title),
-      type: isMovie ? 'movie' : 'series',
+      title: info?.title || item.title,
+      episodeTitle: epTitle || null,
+      type: isSeries ? 'series' : 'movie',
       providerValue,
     })
   }
 
-  const generateAI = async () => {
-    setAiLoading(true)
-    try {
-      const result = await generateAISummary({
-        title: info?.title || item.title,
-        synopsis: info?.synopsis,
-        imdbId: info?.imdbId,
-      })
-      setAiSummary(result)
-    } catch {
-      setAiSummary({ hook: 'Could not generate summary.', tags: [] })
-    }
-    setAiLoading(false); setAiDone(true)
-  }
-
   const poster = info?.image || item.image
+  const activeLink = linkList[activeLinkIdx]
 
   return (
-    <div className="page fade-in">
-      <button className="btn btn-glass btn-back" onClick={() => navigate('home')}>
-        <Icons.Back /> Back
-      </button>
-
-      <div className="info-backdrop">
-        {poster && !imgErr && <img src={poster} alt="" onError={() => setImgErr(true)} />}
-        <div className="info-backdrop-grad" />
-        <div className="info-backdrop-grad-side" />
+    <div className="info-page fade-in">
+      {/* Full bleed backdrop */}
+      <div className="info-hero-backdrop">
+        {poster && !imgErr && (
+          <img src={poster} alt="" onError={() => setImgErr(true)} />
+        )}
+        <div className="info-hero-grad-bottom" />
+        <div className="info-hero-grad-top" />
       </div>
 
-      {loading && <div className="spinner" style={{ marginTop: 120 }} />}
-      {error && !loading && <div className="error-banner" style={{ marginTop: 80 }}>⚠ {error}</div>}
+      {/* Floating back button */}
+      <button className="info-back-btn" onClick={() => navigate('home')}>
+        <Icons.Back />
+      </button>
+
+      {loading && (
+        <div className="info-loading">
+          <div className="spinner" />
+        </div>
+      )}
+
+      {error && !loading && (
+        <div className="info-error">⚠ {error}</div>
+      )}
 
       {!loading && (
-        <div className="info-layout">
-          {/* Poster */}
-          <div className="info-poster glass">
-            {poster && !imgErr
-              ? <img src={poster} alt={item.title} onError={() => setImgErr(true)} />
-              : <div className="poster-placeholder"><Icons.Film /></div>}
+        <div className="info-body">
+          {/* Top section: poster + core info */}
+          <div className="info-top">
+            <div className="info-poster-wrap">
+              {poster && !imgErr
+                ? <img src={poster} alt={item.title} onError={() => setImgErr(true)} className="info-poster-img" />
+                : <div className="info-poster-placeholder"><Icons.Film /></div>
+              }
+            </div>
+            <div className="info-core">
+              <h1 className="info-title">{info?.title || item.title}</h1>
+
+              <div className="info-chips">
+                {info?.rating && <span className="info-chip info-chip-star">⭐ {info.rating}</span>}
+                {info?.type && <span className="info-chip">{info.type}</span>}
+                {isSeries && episodes.length > 0 && (
+                  <span className="info-chip">{episodes.length} Episodes</span>
+                )}
+              </div>
+
+              {info?.tags?.length > 0 && (
+                <div className="info-tags">
+                  {info.tags.slice(0, 4).map(t => (
+                    <span key={t} className="info-tag">{t}</span>
+                  ))}
+                </div>
+              )}
+
+              {/* Primary actions */}
+              <div className="info-actions">
+                {!isSeries && (
+                  <button className="info-play-btn" onClick={() => watchNow(episodes[0]?.link)}>
+                    <Icons.Play /> Watch Now
+                  </button>
+                )}
+                {isSeries && episodes.length > 0 && (
+                  <button className="info-play-btn" onClick={() => watchNow(episodes[0]?.link, episodes[0]?.title)}>
+                    <Icons.Play /> Play E1
+                  </button>
+                )}
+                <button
+                  className={`info-wl-btn ${inWL ? 'active' : ''}`}
+                  onClick={toggleWatchlist}
+                >
+                  {inWL ? <><Icons.Check /> Saved</> : <><Icons.Plus /> Watchlist</>}
+                </button>
+              </div>
+            </div>
           </div>
 
-          {/* Details */}
-          <div className="info-details">
-            <h1 className="info-title">{info?.title || item.title}</h1>
+          {/* Synopsis */}
+          {(info?.synopsis && info.synopsis !== 'No synopsis available.') && (
+            <p className="info-synopsis">{info.synopsis}</p>
+          )}
+          {info?.cast?.length > 0 && (
+            <p className="info-cast">
+              <span className="info-cast-label">Cast</span>
+              {info.cast.slice(0, 5).join(' · ')}
+            </p>
+          )}
 
-            <div className="info-meta-row">
-              {info?.rating && <span className="meta-chip">⭐ {info.rating}</span>}
-              {info?.type   && <span className="meta-chip">{info.type}</span>}
-              {!isMovie && episodes.length > 0 && <span className="meta-chip">{episodes.length} Episodes</span>}
-            </div>
-
-            {info?.tags?.length > 0 && (
-              <div className="tags-row">
-                {info.tags.map(t => <span key={t} className="tag">{t}</span>)}
-              </div>
-            )}
-
-            <p className="info-synopsis">{info?.synopsis || 'No synopsis available.'}</p>
-            {info?.cast?.length > 0 && (
-              <p className="info-cast"><strong>Cast:</strong> {info.cast.slice(0, 5).join(', ')}</p>
-            )}
-
-            {/* Actions */}
-            <div className="info-actions">
-              {/* Movie: Watch Now button */}
-              {isMovie && (
-                <button className="btn btn-primary" onClick={() => watchNow(episodes[0]?.link, episodes[0]?.title)}>
-                  <Icons.Play /> Watch Now
-                </button>
-              )}
-              {/* Series with no episodes yet loaded */}
-              {!isMovie && episodes.length === 0 && !epLoading && (
-                <button className="btn btn-primary" onClick={() => watchNow()}>
-                  <Icons.Play /> Watch Now
-                </button>
-              )}
-              <button className={`btn ${inWL ? 'btn-glass active-wl' : 'btn-glass'}`} onClick={toggleWatchlist}>
-                {inWL ? <><Icons.Check /> In Watchlist</> : <><Icons.Plus /> Watchlist</>}
-              </button>
-            </div>
-
-            {/* Season / Quality selector — shown when multiple linkList items */}
-            {linkList.length > 1 && (
-              <div className="season-selector">
-                <p className="season-label">
-                  {linkList[0]?.episodesLink ? 'Season' : 'Quality'}
-                </p>
-                <div className="season-chips">
-                  {linkList.map((ll, i) => (
+          {/* Quality / Season selector */}
+          {linkList.length > 1 && (
+            <div className="info-section">
+              <h3 className="info-section-title">
+                {isSeries ? 'Season' : 'Quality'}
+              </h3>
+              <div className="info-quality-list">
+                {linkList.map((ll, i) => {
+                  const q = extractQuality(ll.title) || ll.title || (isSeries ? `Season ${i+1}` : `Option ${i+1}`)
+                  return (
                     <button
                       key={i}
-                      className={`season-chip ${activeLinkIdx === i ? 'active' : ''}`}
+                      className={`info-quality-btn ${activeLinkIdx === i ? 'active' : ''}`}
                       onClick={() => switchLink(i)}
                     >
-                      {ll.title || (ll.quality ? `${ll.quality}p` : `Option ${i + 1}`)}
+                      {q}
                     </button>
-                  ))}
-                </div>
+                  )
+                })}
               </div>
-            )}
+            </div>
+          )}
 
-            {/* AI Summary */}
-            {!aiDone && !aiLoading && (
-              <button className="btn btn-ai" onClick={generateAI} style={{ marginTop: 16 }}>
-                <Icons.Sparkle /> ✨ Generate AI Summary
-              </button>
-            )}
-            {aiLoading && (
-              <div className="ai-box" style={{ marginTop: 16 }}>
-                <div className="ai-label"><Icons.Sparkle /> Generating…</div>
-                <div className="ai-dots"><span /><span /><span /></div>
+          {/* Movie: direct quality options */}
+          {!isSeries && episodes.length > 1 && (
+            <div className="info-section">
+              <h3 className="info-section-title">Choose Quality</h3>
+              <div className="info-direct-list">
+                {episodes.map((ep, i) => {
+                  const q = extractQuality(ep.title)
+                  const label = q ? `${q}` : ep.title || `Option ${i+1}`
+                  // Show file size if in title
+                  const sizeMatch = ep.title?.match(/\[?(\d+(?:\.\d+)?\s*(?:MB|GB))\]?/i)
+                  const size = sizeMatch ? sizeMatch[1] : null
+                  return (
+                    <button
+                      key={ep.link || i}
+                      className="info-direct-btn"
+                      onClick={() => watchNow(ep.link, ep.title)}
+                    >
+                      <span className="direct-quality">{label}</span>
+                      {size && <span className="direct-size">{size}</span>}
+                      <span className="direct-arrow"><Icons.Play /></span>
+                    </button>
+                  )
+                })}
               </div>
-            )}
-            {aiDone && aiSummary && (
-              <div className="ai-box fade-in" style={{ marginTop: 16 }}>
-                <div className="ai-label"><Icons.Sparkle /> AI Summary</div>
-                <p className="ai-text">{aiSummary.hook}</p>
-                {aiSummary.tags?.length > 0 && (
-                  <div className="tags-row" style={{ marginTop: 10 }}>
-                    {aiSummary.tags.map(t => <span key={t} className="tag tag-ai">{t}</span>)}
+            </div>
+          )}
+
+          {/* Series: episode list */}
+          {isSeries && (
+            <div className="info-section">
+              <h3 className="info-section-title">Episodes</h3>
+              {epLoading && <div className="spinner" style={{ margin: '20px auto' }} />}
+              {!epLoading && episodes.length === 0 && (
+                <p className="info-empty">No episodes found.</p>
+              )}
+              <div className="ep-list">
+                {episodes.map((ep, i) => (
+                  <div
+                    key={ep.link || i}
+                    className="ep-item"
+                    onClick={() => watchNow(ep.link, ep.title)}
+                  >
+                    <div className="ep-num">{String(i + 1).padStart(2, '0')}</div>
+                    <div className="ep-info">
+                      <div className="ep-title">
+                        {ep.title || `Episode ${i + 1}`}
+                      </div>
+                    </div>
+                    <div className="ep-icon"><Icons.Play /></div>
                   </div>
-                )}
+                ))}
               </div>
-            )}
-
-            {/* Episodes (series only) */}
-            {!isMovie && (
-              <div className="episodes-section">
-                <h2 className="section-title">Episodes</h2>
-                {epLoading && <div className="spinner" style={{ margin: '20px auto' }} />}
-                {!epLoading && episodes.length === 0 && (
-                  <p style={{ color: 'var(--muted)', fontSize: 13 }}>No episodes found.</p>
-                )}
-                <div className="episodes-list">
-                  {episodes.map((ep, i) => (
-                    <div key={ep.link || i} className="episode-row glass2" onClick={() => watchNow(ep.link, ep.title)}>
-                      <span className="ep-num">{String(i + 1).padStart(2, '0')}</span>
-                      <span className="ep-title">{ep.title || `Episode ${i + 1}`}</span>
-                      <span className="ep-arrow"><Icons.ChevronR /></span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Movie quality links */}
-            {isMovie && episodes.length > 1 && (
-              <div className="episodes-section">
-                <h2 className="section-title">Quality Options</h2>
-                <div className="episodes-list">
-                  {episodes.map((ep, i) => (
-                    <div key={ep.link || i} className="episode-row glass2" onClick={() => watchNow(ep.link, ep.title)}>
-                      <span className="ep-num"><Icons.Play /></span>
-                      <span className="ep-title">{ep.title || `Option ${i + 1}`}</span>
-                      <span className="ep-arrow"><Icons.ChevronR /></span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
     </div>
