@@ -1,44 +1,44 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { getMeta, getEpisodes } from '../lib/providers.js'
 import { watchlistStorage, historyStorage } from '../lib/storage.js'
+import { analyzeContent } from '../lib/contentUtils.js'
 import { useAuth } from '../lib/auth.jsx'
-import { Icons } from '../components/Icons.jsx'
 
-// Detect if a linkList item is a movie quality option (not a season)
-function isMovieQuality(linkItem) {
-  if (!linkItem) return false
-  // If it has directLinks where ALL items are type 'movie', it's a movie
-  if (linkItem.directLinks?.length) {
-    return linkItem.directLinks.every(d => d.type === 'movie' || !d.type)
-  }
-  // If it has an episodesLink, it's definitely a series season
-  if (linkItem.episodesLink) return false
-  return false
-}
+// ── Icons (inline SVG) ────────────────────────────────────────────────────
+const PlayIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" width={18} height={18}><path d="M8 5v14l11-7z"/></svg>
+)
+const PlusIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} width={16} height={16}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+)
+const CheckIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} width={16} height={16}><polyline points="20 6 9 17 4 12"/></svg>
+)
+const BackIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} width={20} height={20}><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+)
+const ChevronR = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} width={16} height={16}><polyline points="9 18 15 12 9 6"/></svg>
+)
 
-function extractQuality(title) {
-  if (!title) return null
-  const m = title.match(/(\d{3,4}p|4K|2160p|1080p|720p|480p|360p)/i)
-  return m ? m[1].toUpperCase() : null
-}
-
+// ── Component ─────────────────────────────────────────────────────────────
 export default function InfoPage({ params, navigate }) {
   const { item, providerValue } = params
   const { user } = useAuth()
 
-  const [info, setInfo]               = useState(null)
-  const [linkList, setLinkList]       = useState([])
-  const [activeLinkIdx, setActiveLinkIdx] = useState(0)
-  const [episodes, setEpisodes]       = useState([])
-  const [epLoading, setEpLoading]     = useState(false)
-  const [loading, setLoading]         = useState(true)
-  const [error, setError]             = useState(null)
-  const [inWL, setInWL]               = useState(() => user ? watchlistStorage.has(user.username, item.link) : false)
-  const [imgErr, setImgErr]           = useState(false)
+  const [info,       setInfo]       = useState(null)
+  const [content,    setContent]    = useState(null)   // analyzeContent result
+  const [episodes,   setEpisodes]   = useState([])
+  const [activeSzIdx,setActiveSzIdx]= useState(0)
+  const [epLoading,  setEpLoading]  = useState(false)
+  const [loading,    setLoading]    = useState(true)
+  const [error,      setError]      = useState(null)
+  const [imgErr,     setImgErr]     = useState(false)
+  const [inWL,       setInWL]       = useState(
+    () => user ? watchlistStorage.has(user.username, item.link) : false
+  )
 
-  // Is this content a movie? True when all linkList items are movie quality options
-  const isSeries = linkList.length > 0 && linkList.some(l => l.episodesLink)
-
+  // Load meta
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -47,9 +47,12 @@ export default function InfoPage({ params, navigate }) {
         const meta = await getMeta({ providerValue, link: item.link })
         if (cancelled) return
         setInfo(meta)
-        const ll = meta?.linkList || []
-        setLinkList(ll)
-        if (ll.length > 0) await loadEpisodes(ll[0], cancelled)
+        const c = analyzeContent(meta)
+        setContent(c)
+        // Auto-load first season episodes for series
+        if (c.kind === 'series' && c.seasons.length > 0) {
+          await loadSeason(c.seasons[0], cancelled)
+        }
       } catch (e) {
         if (!cancelled) setError(e.message)
       } finally {
@@ -59,17 +62,20 @@ export default function InfoPage({ params, navigate }) {
     return () => { cancelled = true }
   }, [item.link, providerValue])
 
-  const loadEpisodes = async (linkItem, cancelled = false) => {
-    if (!linkItem) return
-    setEpLoading(true)
-    setEpisodes([])
+  // Back button — Android hardware back
+  useEffect(() => {
+    const onPop = () => navigate('home')
+    window.addEventListener('popstate', onPop)
+    // Push a dummy state so back doesn't exit the app
+    window.history.pushState({ page: 'info' }, '')
+    return () => window.removeEventListener('popstate', onPop)
+  }, [navigate])
+
+  const loadSeason = async (season, cancelled = false) => {
+    setEpLoading(true); setEpisodes([])
     try {
-      if (linkItem.episodesLink) {
-        const eps = await getEpisodes({ providerValue, url: linkItem.episodesLink })
-        if (!cancelled) setEpisodes(eps || [])
-      } else if (linkItem.directLinks?.length) {
-        if (!cancelled) setEpisodes(linkItem.directLinks)
-      }
+      const eps = await getEpisodes({ providerValue, url: season.episodesLink })
+      if (!cancelled) setEpisodes(eps || [])
     } catch {
       if (!cancelled) setEpisodes([])
     } finally {
@@ -77,206 +83,304 @@ export default function InfoPage({ params, navigate }) {
     }
   }
 
-  const switchLink = async (idx) => {
-    setActiveLinkIdx(idx)
-    await loadEpisodes(linkList[idx])
+  const switchSeason = async (idx) => {
+    setActiveSzIdx(idx)
+    if (content?.seasons[idx]) await loadSeason(content.seasons[idx])
   }
 
-  const toggleWatchlist = () => {
+  const toggleWL = () => {
     if (!user) return
     const added = watchlistStorage.toggle(user.username, {
-      title: item.title, link: item.link,
+      title: info?.title || item.title,
+      link:  item.link,
       image: info?.image || item.image,
       provider: providerValue,
     })
     setInWL(added)
   }
 
-  const watchNow = (epLink, epTitle) => {
+  const addHistory = useCallback(() => {
     if (user) historyStorage.add(user.username, {
-      title: item.title, link: item.link,
+      title: info?.title || item.title,
+      link:  item.link,
       image: info?.image || item.image,
       provider: providerValue,
     })
+  }, [user, info, item, providerValue])
+
+  // Navigate to player
+  const playMovie = (qualityItem) => {
+    addHistory()
     navigate('player', {
-      link: epLink || item.link,
-      title: info?.title || item.title,
-      episodeTitle: epTitle || null,
-      type: isSeries ? 'series' : 'movie',
+      kind:         'movie',
+      title:        info?.title || item.title,
       providerValue,
+      // Pass all direct links for this quality so player can pick servers
+      directLinks:  qualityItem.directLinks,
+      qualityLabel: qualityItem.label,
+      allQualities: content?.qualities || [],
+    })
+  }
+
+  const playEpisode = (ep, epIdx) => {
+    addHistory()
+    navigate('player', {
+      kind:         'series',
+      title:        info?.title || item.title,
+      episodeTitle: ep.title || `Episode ${epIdx + 1}`,
+      episodeIdx:   epIdx,
+      providerValue,
+      link:         ep.link,
+      // Pass all episodes so player can show next-episode list
+      allEpisodes:  episodes,
+      seasonTitle:  content?.seasons[activeSzIdx]?.title || `Season ${activeSzIdx + 1}`,
     })
   }
 
   const poster = info?.image || item.image
-  const activeLink = linkList[activeLinkIdx]
 
   return (
-    <div className="info-page fade-in">
-      {/* Full bleed backdrop */}
-      <div className="info-hero-backdrop">
+    <div style={{ minHeight:'100vh', background:'var(--bg)', fontFamily:"'DM Sans',sans-serif", position:'relative' }}>
+
+      {/* ── Backdrop ── */}
+      <div style={{ position:'fixed', top:0, left:0, right:0, height:'65vh', zIndex:0, overflow:'hidden', pointerEvents:'none' }}>
         {poster && !imgErr && (
-          <img src={poster} alt="" onError={() => setImgErr(true)} />
+          <img src={poster} alt="" onError={()=>setImgErr(true)}
+            style={{ width:'100%', height:'100%', objectFit:'cover', opacity:.18, filter:'blur(3px)', transform:'scale(1.06)' }} />
         )}
-        <div className="info-hero-grad-bottom" />
-        <div className="info-hero-grad-top" />
+        <div style={{ position:'absolute', inset:0, background:'linear-gradient(to top, var(--bg) 0%, rgba(10,10,10,.55) 50%, transparent 100%)' }} />
+        <div style={{ position:'absolute', inset:0, background:'linear-gradient(to right, var(--bg) 0%, transparent 55%)' }} />
       </div>
 
-      {/* Floating back button */}
-      <button className="info-back-btn" onClick={() => navigate('home')}>
-        <Icons.Back />
+      {/* Back button */}
+      <button
+        onClick={() => navigate('home')}
+        style={{ position:'fixed', top:72, left:16, zIndex:50, width:38, height:38, borderRadius:'50%',
+          background:'rgba(10,10,10,.85)', backdropFilter:'blur(10px)', border:'1px solid rgba(255,255,255,.1)',
+          color:'var(--text)', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' }}
+      >
+        <BackIcon />
       </button>
 
-      {loading && (
-        <div className="info-loading">
-          <div className="spinner" />
-        </div>
-      )}
+      {/* ── Body ── */}
+      <div style={{ position:'relative', zIndex:10, maxWidth:860, margin:'0 auto', padding:'80px 20px 60px' }}>
 
-      {error && !loading && (
-        <div className="info-error">⚠ {error}</div>
-      )}
+        {loading && <div className="spinner" style={{ marginTop:120 }} />}
+        {error && !loading && (
+          <div style={{ color:'var(--error)', padding:'12px 16px', borderRadius:10, background:'rgba(255,68,85,.07)',
+            border:'1px solid rgba(255,68,85,.2)', marginTop:80 }}>⚠ {error}</div>
+        )}
 
-      {!loading && (
-        <div className="info-body">
-          {/* Top section: poster + core info */}
-          <div className="info-top">
-            <div className="info-poster-wrap">
-              {poster && !imgErr
-                ? <img src={poster} alt={item.title} onError={() => setImgErr(true)} className="info-poster-img" />
-                : <div className="info-poster-placeholder"><Icons.Film /></div>
-              }
-            </div>
-            <div className="info-core">
-              <h1 className="info-title">{info?.title || item.title}</h1>
-
-              <div className="info-chips">
-                {info?.rating && <span className="info-chip info-chip-star">⭐ {info.rating}</span>}
-                {info?.type && <span className="info-chip">{info.type}</span>}
-                {isSeries && episodes.length > 0 && (
-                  <span className="info-chip">{episodes.length} Episodes</span>
-                )}
+        {!loading && info && content && (
+          <>
+            {/* ── TOP: poster + core info ── */}
+            <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'flex-start' }}>
+              <div style={{ flexShrink:0, width:140, borderRadius:14, overflow:'hidden',
+                boxShadow:'0 20px 60px rgba(0,0,0,.7), 0 0 30px var(--accent-glow)',
+                border:'1px solid rgba(255,255,255,.08)' }}>
+                {poster && !imgErr
+                  ? <img src={poster} alt={info.title||item.title} onError={()=>setImgErr(true)} style={{ width:'100%', display:'block' }} />
+                  : <div style={{ aspectRatio:'2/3', background:'var(--surface2)', display:'flex', alignItems:'center', justifyContent:'center', color:'var(--muted)', fontSize:40 }}>🎬</div>}
               </div>
 
-              {info?.tags?.length > 0 && (
-                <div className="info-tags">
-                  {info.tags.slice(0, 4).map(t => (
-                    <span key={t} className="info-tag">{t}</span>
-                  ))}
-                </div>
-              )}
+              <div style={{ flex:1, minWidth:0, paddingTop:4 }}>
+                <h1 style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:'clamp(24px,5vw,50px)',
+                  letterSpacing:1, lineHeight:1.05, marginBottom:10 }}>
+                  {info.title || item.title}
+                </h1>
 
-              {/* Primary actions */}
-              <div className="info-actions">
-                {!isSeries && (
-                  <button className="info-play-btn" onClick={() => watchNow(episodes[0]?.link)}>
-                    <Icons.Play /> Watch Now
-                  </button>
+                {/* Meta chips */}
+                <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
+                  {info.rating && (
+                    <span style={chipStyle('#ffc800', 'rgba(255,200,0,.12)', 'rgba(255,200,0,.2)')}>
+                      ⭐ {info.rating}
+                    </span>
+                  )}
+                  <span style={chipStyle('var(--text2)','var(--surface3)','var(--glass-bdr)')}>
+                    {content.kind === 'series' ? '📺 Series' : '🎬 Movie'}
+                  </span>
+                  {content.kind === 'series' && (
+                    <span style={chipStyle('var(--text2)','var(--surface3)','var(--glass-bdr)')}>
+                      {content.seasons.length} Season{content.seasons.length !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                  {content.kind === 'movie' && content.qualities.length > 0 && (
+                    <span style={chipStyle('var(--accent2)','var(--accent-dim)','var(--accent-bdr)')}>
+                      {content.qualities.map(q=>q.label).join(' · ')}
+                    </span>
+                  )}
+                </div>
+
+                {/* Genre tags */}
+                {info.tags?.length > 0 && (
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:14 }}>
+                    {info.tags.slice(0,5).map(t => (
+                      <span key={t} style={{ padding:'3px 10px', borderRadius:20, fontSize:11, fontWeight:600,
+                        background:'var(--accent-dim)', color:'var(--accent2)', border:'1px solid var(--accent-bdr)' }}>
+                        {t}
+                      </span>
+                    ))}
+                  </div>
                 )}
-                {isSeries && episodes.length > 0 && (
-                  <button className="info-play-btn" onClick={() => watchNow(episodes[0]?.link, episodes[0]?.title)}>
-                    <Icons.Play /> Play E1
-                  </button>
-                )}
-                <button
-                  className={`info-wl-btn ${inWL ? 'active' : ''}`}
-                  onClick={toggleWatchlist}
-                >
-                  {inWL ? <><Icons.Check /> Saved</> : <><Icons.Plus /> Watchlist</>}
+
+                {/* Watchlist */}
+                <button onClick={toggleWL} style={{
+                  display:'inline-flex', alignItems:'center', gap:7, padding:'9px 16px', borderRadius:10,
+                  background: inWL ? 'var(--accent-dim)' : 'var(--glass2)',
+                  border: `1px solid ${inWL ? 'var(--accent)' : 'var(--glass-bdr)'}`,
+                  color: inWL ? 'var(--accent2)' : 'var(--text)',
+                  fontSize:13, fontWeight:600, cursor:'pointer', transition:'all .2s',
+                  backdropFilter:'blur(12px)'
+                }}>
+                  {inWL ? <CheckIcon /> : <PlusIcon />}
+                  {inWL ? 'In Watchlist' : '+ Watchlist'}
                 </button>
               </div>
             </div>
-          </div>
 
-          {/* Synopsis */}
-          {(info?.synopsis && info.synopsis !== 'No synopsis available.') && (
-            <p className="info-synopsis">{info.synopsis}</p>
-          )}
-          {info?.cast?.length > 0 && (
-            <p className="info-cast">
-              <span className="info-cast-label">Cast</span>
-              {info.cast.slice(0, 5).join(' · ')}
-            </p>
-          )}
+            {/* Synopsis */}
+            {info.synopsis && info.synopsis !== 'No synopsis available.' && (
+              <p style={{ color:'var(--text2)', fontSize:14, lineHeight:1.7, marginBottom:16 }}>
+                {info.synopsis}
+              </p>
+            )}
+            {info.cast?.length > 0 && (
+              <p style={{ fontSize:13, color:'var(--muted)', marginBottom:24 }}>
+                <span style={{ color:'var(--text2)', fontWeight:600 }}>Cast </span>
+                {info.cast.slice(0,5).join(' · ')}
+              </p>
+            )}
 
-          {/* Quality / Season selector */}
-          {linkList.length > 1 && (
-            <div className="info-section">
-              <h3 className="info-section-title">
-                {isSeries ? 'Season' : 'Quality'}
-              </h3>
-              <div className="info-quality-list">
-                {linkList.map((ll, i) => {
-                  const q = extractQuality(ll.title) || ll.title || (isSeries ? `Season ${i+1}` : `Option ${i+1}`)
-                  return (
+            {/* ════════════════════════════════════════
+                MOVIE FLOW
+                ════════════════════════════════════════ */}
+            {content.kind === 'movie' && (
+              <section>
+                <SectionHeader>Choose Quality</SectionHeader>
+                <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                  {content.qualities.map((q, i) => (
                     <button
                       key={i}
-                      className={`info-quality-btn ${activeLinkIdx === i ? 'active' : ''}`}
-                      onClick={() => switchLink(i)}
+                      onClick={() => playMovie(q)}
+                      style={{
+                        display:'flex', alignItems:'center', gap:14, padding:'14px 18px',
+                        borderRadius:12, background:'var(--surface2)', border:'1px solid var(--glass-bdr)',
+                        cursor:'pointer', transition:'all .2s', textAlign:'left', width:'100%',
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background='var(--accent-dim)'; e.currentTarget.style.borderColor='var(--accent)' }}
+                      onMouseLeave={e => { e.currentTarget.style.background='var(--surface2)'; e.currentTarget.style.borderColor='var(--glass-bdr)' }}
                     >
-                      {q}
+                      <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:28, color:'var(--accent2)', minWidth:56 }}>
+                        {q.label}
+                      </span>
+                      <span style={{ flex:1, fontSize:13, color:'var(--text2)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {q.rawTitle}
+                      </span>
+                      <span style={{ color:'var(--accent)', flexShrink:0 }}><PlayIcon /></span>
                     </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
+                  ))}
+                </div>
+              </section>
+            )}
 
-          {/* Movie: direct quality options */}
-          {!isSeries && episodes.length > 1 && (
-            <div className="info-section">
-              <h3 className="info-section-title">Choose Quality</h3>
-              <div className="info-direct-list">
-                {episodes.map((ep, i) => {
-                  const q = extractQuality(ep.title)
-                  const label = q ? `${q}` : ep.title || `Option ${i+1}`
-                  // Show file size if in title
-                  const sizeMatch = ep.title?.match(/\[?(\d+(?:\.\d+)?\s*(?:MB|GB))\]?/i)
-                  const size = sizeMatch ? sizeMatch[1] : null
-                  return (
-                    <button
-                      key={ep.link || i}
-                      className="info-direct-btn"
-                      onClick={() => watchNow(ep.link, ep.title)}
-                    >
-                      <span className="direct-quality">{label}</span>
-                      {size && <span className="direct-size">{size}</span>}
-                      <span className="direct-arrow"><Icons.Play /></span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Series: episode list */}
-          {isSeries && (
-            <div className="info-section">
-              <h3 className="info-section-title">Episodes</h3>
-              {epLoading && <div className="spinner" style={{ margin: '20px auto' }} />}
-              {!epLoading && episodes.length === 0 && (
-                <p className="info-empty">No episodes found.</p>
-              )}
-              <div className="ep-list">
-                {episodes.map((ep, i) => (
-                  <div
-                    key={ep.link || i}
-                    className="ep-item"
-                    onClick={() => watchNow(ep.link, ep.title)}
+            {/* ════════════════════════════════════════
+                SERIES FLOW
+                ════════════════════════════════════════ */}
+            {content.kind === 'series' && (
+              <>
+                {/* Play first episode button */}
+                {episodes.length > 0 && (
+                  <button
+                    onClick={() => playEpisode(episodes[0], 0)}
+                    style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 24px',
+                      borderRadius:12, background:'var(--accent)', border:'none', color:'#fff',
+                      fontSize:15, fontWeight:700, cursor:'pointer', marginBottom:24,
+                      boxShadow:'0 0 24px var(--accent-glow)', transition:'all .2s' }}
                   >
-                    <div className="ep-num">{String(i + 1).padStart(2, '0')}</div>
-                    <div className="ep-info">
-                      <div className="ep-title">
-                        {ep.title || `Episode ${i + 1}`}
-                      </div>
+                    <PlayIcon /> Play S{activeSzIdx+1} E1
+                  </button>
+                )}
+
+                {/* Season tabs */}
+                {content.seasons.length > 1 && (
+                  <div style={{ marginBottom:20 }}>
+                    <SectionHeader>Season</SectionHeader>
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                      {content.seasons.map((sz, i) => (
+                        <button
+                          key={i}
+                          onClick={() => switchSeason(i)}
+                          style={{
+                            padding:'8px 18px', borderRadius:20, fontSize:13, fontWeight:600,
+                            border: `2px solid ${activeSzIdx===i ? 'var(--accent)' : 'var(--glass-bdr)'}`,
+                            background: activeSzIdx===i ? 'var(--accent)' : 'var(--surface2)',
+                            color: activeSzIdx===i ? '#fff' : 'var(--text2)',
+                            cursor:'pointer', transition:'all .2s',
+                            boxShadow: activeSzIdx===i ? '0 0 14px var(--accent-glow)' : 'none',
+                          }}
+                        >
+                          {sz.title || `Season ${i + 1}`}
+                        </button>
+                      ))}
                     </div>
-                    <div className="ep-icon"><Icons.Play /></div>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+                )}
+
+                {/* Episode list */}
+                <div>
+                  <SectionHeader>
+                    Episodes {episodes.length > 0 && <span style={{ color:'var(--muted)', fontSize:13, fontWeight:400 }}>({episodes.length})</span>}
+                  </SectionHeader>
+                  {epLoading && <div className="spinner" style={{ margin:'20px auto' }} />}
+                  {!epLoading && episodes.length === 0 && (
+                    <p style={{ color:'var(--muted)', fontSize:13 }}>No episodes found.</p>
+                  )}
+                  <div style={{ display:'flex', flexDirection:'column', gap:8, maxHeight:'60vh', overflowY:'auto' }}>
+                    {episodes.map((ep, i) => (
+                      <div
+                        key={ep.link || i}
+                        onClick={() => playEpisode(ep, i)}
+                        style={{
+                          display:'flex', alignItems:'center', gap:14, padding:'13px 16px',
+                          borderRadius:12, background:'var(--surface2)', border:'1px solid var(--glass-bdr)',
+                          cursor:'pointer', transition:'all .2s',
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.background='var(--accent-dim)'; e.currentTarget.style.borderColor='var(--accent)' }}
+                        onMouseLeave={e => { e.currentTarget.style.background='var(--surface2)'; e.currentTarget.style.borderColor='var(--glass-bdr)' }}
+                      >
+                        <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:22, color:'var(--accent2)', minWidth:32 }}>
+                          {String(i+1).padStart(2,'0')}
+                        </span>
+                        <span style={{ flex:1, fontSize:14, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                          {ep.title || `Episode ${i+1}`}
+                        </span>
+                        <span style={{ color:'var(--accent)', flexShrink:0 }}><ChevronR /></span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
     </div>
+  )
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function chipStyle(color, bg, border) {
+  return {
+    padding:'3px 10px', borderRadius:6, fontSize:12, fontWeight:500,
+    color, background:bg, border:`1px solid ${border}`,
+  }
+}
+
+function SectionHeader({ children }) {
+  return (
+    <h3 style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:18, letterSpacing:1,
+      color:'var(--text2)', marginBottom:12, display:'flex', alignItems:'center', gap:8 }}>
+      {children}
+    </h3>
   )
 }
