@@ -524,3 +524,6 @@ main.with-navbar { padding-top: 62px; }
 }
 .picker-manage:hover { color:var(--text); border-color:var(--accent); }
 .picker-manage svg { width:15px; height:15px; }
+
+/* ── Player spin keyframe ── */
+@keyframes playerSpin { to { transform: rotate(360deg); } }
