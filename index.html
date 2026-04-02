@@ -11,9 +11,9 @@
     <meta name="author" content="WellStreamer" />
 
     <!-- ── Theme ── -->
-    <meta name="theme-color" content="#000000" />
-    <meta name="msapplication-TileColor" content="#000000" />
-    <meta name="msapplication-TileImage" content="/icons/icon-144.png" />
+    <meta name="theme-color" content="#0b0b0b" />
+    <meta name="msapplication-TileColor" content="#0b0b0b" />
+    <meta name="msapplication-TileImage" content="/wellstreamer-144.png" />
 
     <!-- ── PWA / Installable ── -->
     <link rel="manifest" href="/manifest.json" />
@@ -22,37 +22,46 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="WellStreamer" />
-    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-    <link rel="apple-touch-icon" sizes="152x152" href="/icons/icon-152.png" />
-    <link rel="apple-touch-icon" sizes="144x144" href="/icons/icon-144.png" />
+    <link rel="apple-touch-icon" href="/wellstreamer-152.png" />
+    <link rel="apple-touch-icon" sizes="144x144" href="/wellstreamer-144.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="/wellstreamer-192.png" />
 
     <!-- iOS splash screens -->
     <link rel="apple-touch-startup-image"
-      href="/splash/splash-1125x2436.png"
+      href="/splash-640x1136.png"
+      media="(device-width: 320px) and (device-height: 568px) and (-webkit-device-pixel-ratio: 2)" />
+    <link rel="apple-touch-startup-image"
+      href="/splash-750x1334.png"
+      media="(device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2)" />
+    <link rel="apple-touch-startup-image"
+      href="/splash-1125x2436.png"
       media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3)" />
     <link rel="apple-touch-startup-image"
-      href="/splash/splash-1242x2688.png"
-      media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3)" />
+      href="/splash-1536x2048.png"
+      media="(device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2)" />
     <link rel="apple-touch-startup-image"
-      href="/splash/splash-828x1792.png"
-      media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2)" />
+      href="/splash-1280x1920.png"
+      media="(device-width: 412px) and (device-height: 732px) and (-webkit-device-pixel-ratio: 2)" />
+    <link rel="apple-touch-startup-image"
+      href="/splash-1920x2560.png"
+      media="(device-width: 480px) and (device-height: 800px) and (-webkit-device-pixel-ratio: 2)" />
 
     <!-- ── Favicon ── -->
-    <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-96.png" />
-    <link rel="icon" type="image/png" sizes="16x16" href="/icons/icon-72.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/wellstreamer-192.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/wellstreamer-72.png" />
 
     <!-- ── Open Graph ── -->
     <meta property="og:type" content="website" />
     <meta property="og:title" content="WellStreamer" />
     <meta property="og:description" content="Stream everything, ad-free." />
-    <meta property="og:image" content="/icons/icon-512.png" />
+    <meta property="og:image" content="/wellstreamer-512.png" />
     <meta property="og:url" content="https://well-streamer.vercel.app" />
 
     <!-- ── Twitter Card ── -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="WellStreamer" />
     <meta name="twitter:description" content="Stream everything, ad-free." />
-    <meta name="twitter:image" content="/icons/icon-512.png" />
+    <meta name="twitter:image" content="/wellstreamer-512.png" />
 
     <!-- ── Fonts ── -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -64,14 +73,13 @@
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
       html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
       body {
-        background: #000;
+        background: #0b0b0b;
         color: #f0f0f0;
         font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         min-height: 100vh;
-        min-height: 100dvh; /* Dynamic viewport for mobile browsers */
+        min-height: 100dvh;
         overflow-x: hidden;
         -webkit-font-smoothing: antialiased;
-        /* Safe area for iOS notch */
         padding-top: env(safe-area-inset-top);
         padding-bottom: env(safe-area-inset-bottom);
       }
@@ -89,14 +97,16 @@
       /* PWA splash screen background */
       .splash {
         position: fixed; inset: 0;
-        background: #000;
+        background: #0b0b0b;
         display: flex; align-items: center; justify-content: center;
         z-index: 9999;
         transition: opacity 0.5s ease;
       }
       .splash-logo {
         font-family: 'Bebas Neue', sans-serif;
-        font-size: 42px; letter-spacing: 3px;
+        font-size: 48px;
+        letter-spacing: 3px;
+        color: #e50914;
       }
       .splash-logo span { color: #e50914; }
     </style>
