@@ -1,29 +1,50 @@
 // src/pages/PlayerPage.jsx
-// STABLE VERSION — fixes iOS blank screen, panel-closes bug, crash on load
+// iOS FIX: Handles MKV streams on iOS, proper fallback chain
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import Hls from 'hls.js'
 import { getStream } from '../lib/providers.js'
 
-// ── Detect iOS once at module level ──────────────────────────────────────
 const IS_IOS = typeof navigator !== 'undefined' && (
   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 )
 
-// ── Quality helpers ───────────────────────────────────────────────────────
+// Can this browser play MKV?
+function canPlayMKV() {
+  if (IS_IOS) return false // iOS Safari/Chrome: NO MKV support
+  const v = document.createElement('video')
+  // Chrome/Firefox on Android/Desktop: yes
+  return v.canPlayType('video/x-matroska') !== '' ||
+         v.canPlayType('video/webm') !== '' ||
+         navigator.userAgent.includes('Chrome') ||
+         navigator.userAgent.includes('Firefox')
+}
+
 const QP_ORDER = ['4K','2160p','1440p','1080p','720p','480p','360p','Auto']
 
 function getQ(s) {
   if (s.quality) { const q=String(s.quality); return q.endsWith('p')?q:(q==='2160'||q==='4K'?'4K':q+'p') }
   const m=`${s.server||''} ${s.link||''}`.match(/\b(2160|4K|1440|1080|720|480|360)\b/i)
-  if (!m) return 'Auto'
-  const n=m[1].toUpperCase(); return (n==='2160'||n==='4K')?'4K':n+'p'
+  if(!m) return 'Auto'; const n=m[1].toUpperCase(); return (n==='2160'||n==='4K')?'4K':n+'p'
 }
 
 function groupQ(streams) {
+  // On iOS: filter out MKV-only streams, prefer HLS
+  const filtered = IS_IOS
+    ? streams.filter(s => {
+        const isHLS = s.type === 'hls' || s.link?.includes('.m3u8')
+        const isMp4 = s.type === 'mp4' || s.link?.includes('.mp4')
+        const isMkv = s.type === 'mkv' || s.link?.includes('.mkv')
+        return isHLS || isMp4 || (!isMkv) // prefer HLS/MP4, exclude pure MKV
+      })
+    : streams
+  
+  // If iOS filtered out everything, fall back to all streams
+  const toGroup = (IS_IOS && filtered.length === 0) ? streams : filtered
+  
   const map={}
-  streams.forEach((s,i)=>{ const q=getQ(s); if(!map[q]) map[q]=[]; map[q].push({...s,_i:i}) })
+  toGroup.forEach((s,i)=>{ const q=getQ(s); if(!map[q]) map[q]=[]; map[q].push({...s,_i:i}) })
   return Object.entries(map)
     .map(([quality,streams])=>({quality,streams}))
     .sort((a,b)=>{const ai=QP_ORDER.indexOf(a.quality),bi=QP_ORDER.indexOf(b.quality);return(ai<0?99:ai)-(bi<0?99:bi)})
@@ -35,7 +56,6 @@ function getLangs(streams) {
     if(/hindi/i.test(t)) s.add('Hindi'); if(/english/i.test(t)) s.add('English')
     if(/tamil/i.test(t)) s.add('Tamil'); if(/telugu/i.test(t)) s.add('Telugu')
     if(/bengali|bangla/i.test(t)) s.add('Bengali'); if(/korean/i.test(t)) s.add('Korean')
-    if(/kannada/i.test(t)) s.add('Kannada'); if(/malayalam/i.test(t)) s.add('Malayalam')
   })
   return [...s]
 }
@@ -46,7 +66,6 @@ function fmt(sec) {
   return h?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`
 }
 
-// ── Icons ────────────────────────────────────────────────────────────────
 const Ic={
   Back: ()=><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} width={20} height={20}><path d="M19 12H5M12 5l-7 7 7 7"/></svg>,
   Play: ()=><svg viewBox="0 0 24 24" fill="currentColor" width={30} height={30}><path d="M8 5v14l11-7z"/></svg>,
@@ -60,53 +79,75 @@ const Ic={
   Gear: ()=><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} width={18} height={18}><circle cx={12} cy={12} r={3}/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
   Eps:  ()=><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} width={18} height={18}><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>,
   Next: ()=><svg viewBox="0 0 24 24" fill="currentColor" width={18} height={18}><path d="M5 4l10 8-10 8V4zM19 5h2v14h-2z"/></svg>,
+  DL:   ()=><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} width={18} height={18}><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>,
 }
 
-// ── Shared styles ────────────────────────────────────────────────────────
 const R='#e50914'
 const IB={background:'none',border:'none',cursor:'pointer',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',borderRadius:8,padding:8,WebkitTapHighlightColor:'transparent',width:38,height:38}
 const OVL={position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(0,0,0,.92)',zIndex:20}
 
-// ── PanelRow — each row in the settings/episodes side panel ──────────────
 function PR({label,active,onClick}) {
   return (
-    <div
-      onClick={e=>{e.stopPropagation();e.preventDefault();onClick()}}
-      onTouchEnd={e=>{e.stopPropagation();e.preventDefault();onClick()}}
-      style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',cursor:'pointer',background:active?`${R}18`:'transparent',borderBottom:'1px solid rgba(255,255,255,.05)'}}
-    >
+    <div onClick={e=>{e.stopPropagation();e.preventDefault();onClick()}} onTouchEnd={e=>{e.stopPropagation();e.preventDefault();onClick()}}
+      style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',cursor:'pointer',background:active?`${R}18`:'transparent',borderBottom:'1px solid rgba(255,255,255,.05)'}}>
       <span style={{fontSize:14,color:active?'#fff':'rgba(255,255,255,.7)',fontWeight:active?700:400}}>{label}</span>
       {active&&<svg viewBox="0 0 24 24" fill="none" stroke={R} strokeWidth={3} width={14} height={14}><polyline points="20 6 9 17 4 12"/></svg>}
     </div>
   )
 }
-
 function PS({title,children}) {
   return <div><p style={{fontSize:10,fontWeight:700,letterSpacing:1.3,textTransform:'uppercase',color:'rgba(255,255,255,.3)',padding:'12px 16px 4px'}}>{title}</p>{children}</div>
 }
 
-// ── MAIN COMPONENT ────────────────────────────────────────────────────────
+// ── iOS MKV Warning overlay ────────────────────────────────────────────────
+function IOSMkvWarning({ stream, onTryAnyway, onBack }) {
+  return (
+    <div style={OVL}>
+      <div style={{textAlign:'center',padding:'0 28px',maxWidth:340}}>
+        <div style={{fontSize:48,marginBottom:16}}>📱</div>
+        <h3 style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,letterSpacing:1,marginBottom:12}}>
+          iOS Compatibility Issue
+        </h3>
+        <p style={{color:'rgba(255,255,255,.7)',fontSize:14,lineHeight:1.7,marginBottom:8}}>
+          This stream is in <strong style={{color:'#fbbf24'}}>MKV format</strong> which iOS Safari cannot play natively.
+        </p>
+        <p style={{color:'rgba(255,255,255,.5)',fontSize:13,lineHeight:1.6,marginBottom:20}}>
+          Try switching to a different server or quality in Settings — some may have HLS streams that work on iOS.
+        </p>
+        <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          <button onClick={onTryAnyway} style={{background:R,color:'#fff',border:'none',borderRadius:10,padding:'12px 20px',fontSize:14,fontWeight:700,cursor:'pointer'}}>
+            Try Anyway
+          </button>
+          {stream?.link && (
+            <a href={stream.link} target="_blank" rel="noreferrer"
+              style={{background:'rgba(255,255,255,.1)',color:'#fff',border:'1px solid rgba(255,255,255,.2)',borderRadius:10,padding:'12px 20px',fontSize:14,fontWeight:600,cursor:'pointer',textDecoration:'none',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+              <Ic.DL/> Open in Browser / Download
+            </a>
+          )}
+          <button onClick={onBack} style={{background:'transparent',color:'rgba(255,255,255,.5)',border:'none',fontSize:13,cursor:'pointer',padding:'8px'}}>
+            ← Go Back
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function PlayerPage({params,navigate,goBack}) {
   const {link,title='',type,kind,episodeTitle='',episodeIdx=0,providerValue,directLinks,allEpisodes=[],seasonTitle='',image}=params
   const K=kind||type||'movie'
 
-  const vRef=useRef(null)   // video element
-  const hRef=useRef(null)   // hls instance
-  const cRef=useRef(null)   // container (for fullscreen)
-  const pRef=useRef(null)   // progress bar
-  const hideT=useRef(null)  // auto-hide timer
-  const nextT=useRef(null)  // autoplay timer
-  const panelDivRef=useRef(null) // panel div ref for click-outside
+  const vRef=useRef(null), hRef=useRef(null), cRef=useRef(null)
+  const pRef=useRef(null), hideT=useRef(null), nextT=useRef(null), panelRef=useRef(null)
 
-  // Stream state
   const [groups,  setGroups]  = useState([])
+  const [allStreams,setAllStreams]=useState([]) // keep ALL streams for iOS fallback
   const [selQ,    setSelQ]    = useState(null)
   const [selSrv,  setSelSrv]  = useState(0)
   const [loading, setLoading] = useState(true)
   const [fErr,    setFErr]    = useState(null)
   const [vErr,    setVErr]    = useState(null)
 
-  // Playback state
   const [playing,  setPlaying]  = useState(false)
   const [prog,     setProg]     = useState(0)
   const [buf,      setBuf]      = useState(0)
@@ -116,11 +157,10 @@ export default function PlayerPage({params,navigate,goBack}) {
   const [vol,      setVol]      = useState(1)
   const [fs,       setFs]       = useState(false)
 
-  // UI state
   const [bright,   setBright]   = useState(100)
   const [screen,   setScreen]   = useState('contain')
   const [showUI,   setShowUI]   = useState(true)
-  const [panel,    setPanel]    = useState(null) // 'settings'|'episodes'|null
+  const [panel,    setPanel]    = useState(null)
   const [skipBtn,  setSkipBtn]  = useState(false)
   const [autoplay, setAutoplay] = useState(true)
   const [cdwn,     setCdwn]     = useState(null)
@@ -128,59 +168,71 @@ export default function PlayerPage({params,navigate,goBack}) {
   const [lang,     setLang]     = useState(null)
   const [epIdx,    setEpIdx]    = useState(episodeIdx)
   const [tapPlay,  setTapPlay]  = useState(false)
+  const [mkvWarn,  setMkvWarn]  = useState(false) // iOS MKV warning
+  const [forceMkv, setForceMkv] = useState(false) // user chose "try anyway"
 
-  // ── CRITICAL iOS FIX: set video attrs synchronously on first render ─────
-  // We use a callback ref so attrs are set the moment the DOM node exists,
-  // BEFORE React sets any other attributes. This is the only reliable way.
-  const videoCallbackRef = useCallback(node => {
+  // Callback ref — sets iOS attrs the moment DOM node exists
+  const videoRef = useCallback(node => {
     if (!node) return
-    // Assign to our ref so other effects can use it
     vRef.current = node
-    // Set iOS attrs immediately — cannot rely on React props for these
     node.setAttribute('playsinline', '')
     node.setAttribute('webkit-playsinline', '')
     node.setAttribute('x-webkit-airplay', 'allow')
     node.removeAttribute('crossorigin')
-    // Mute trick: iOS allows autoplay if muted initially
-    // We'll unmute once playing starts
-    if (IS_IOS) {
-      node.muted = true
-      node.defaultMuted = true
-    }
   }, [])
 
-  // ── Fetch streams ────────────────────────────────────────────────────
+  // Fetch streams
   useEffect(()=>{
     let done=false
     const sl=K==='movie'?(directLinks?.[0]?.link||link):link
     if(!sl){setFErr('No stream link.');setLoading(false);return}
-    setLoading(true);setFErr(null);setVErr(null);setTapPlay(false)
+    setLoading(true);setFErr(null);setVErr(null);setMkvWarn(false);setForceMkv(false)
     ;(async()=>{
       try{
         const data=await getStream({providerValue,link:sl,type:K,signal:new AbortController().signal})
         if(done) return
         const valid=(data||[]).filter(s=>s?.link)
-        const g=groupQ(valid)
+        setAllStreams(valid)
+        const g=groupQ(valid) // filters MKV on iOS
         const ls=getLangs(valid)
         setGroups(g);setLangs(ls)
         if(ls.length) setLang(ls[0])
         if(g.length){setSelQ(g[0].quality);setSelSrv(0)}
-        else setFErr('No streams found. Try a different provider.')
+        else{
+          // No compatible streams for iOS — show all anyway
+          const gAll=groupQ([...valid]) // pass unfiltered
+          if(IS_IOS && gAll.length>0){
+            // Use all streams but warn about MKV
+            setGroups(gAll);setSelQ(gAll[0].quality);setSelSrv(0)
+          } else {
+            setFErr('No streams found. Try a different provider.')
+          }
+        }
       }catch(e){if(!done) setFErr(e.message||'Fetch failed.')}
       finally{if(!done) setLoading(false)}
     })()
     return ()=>{done=true}
   },[link,K,providerValue])
 
-  // ── Mount stream ─────────────────────────────────────────────────────
   const cg=groups.find(g=>g.quality===selQ)
   const cs=cg?.streams[selSrv]||null
 
+  // Check if current stream is MKV (iOS incompatible)
+  const isMkvStream = cs && (cs.type==='mkv' || cs.link?.includes('.mkv'))
+
+  // Mount stream
   useEffect(()=>{
     const v=vRef.current
     if(!cs||!v) return
     setVErr(null);setProg(0);setCt(0);setDur(0);setPlaying(false);setTapPlay(false)
     if(hRef.current){hRef.current.destroy();hRef.current=null}
+
+    // iOS + MKV = show warning unless user forced it
+    if(IS_IOS && isMkvStream && !forceMkv){
+      setMkvWarn(true)
+      return
+    }
+    setMkvWarn(false)
 
     const url=cs.link
     const isHLS=cs.type==='hls'||url.includes('.m3u8')
@@ -191,60 +243,45 @@ export default function PlayerPage({params,navigate,goBack}) {
     }
 
     if(isHLS&&Hls.isSupported()){
-      // Android / Desktop: HLS.js
       const hls=new Hls({maxBufferLength:120,maxMaxBufferLength:300,enableWorker:true,startLevel:-1,
-        xhrSetup(xhr){xhr.withCredentials=false;if(cs.headers) Object.entries(cs.headers).forEach(([k,v2])=>{try{xhr.setRequestHeader(k,v2)}catch{}})}
+        xhrSetup(xhr){xhr.withCredentials=false}
       })
       hls.loadSource(url);hls.attachMedia(v)
-      hls.on(Hls.Events.MANIFEST_PARSED,()=>{
-        if(IS_IOS){v.muted=false;setMuted(false)} // unmute after manifest
-        v.play().catch(()=>setTapPlay(true))
-      })
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>setTapPlay(true)))
       hls.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)onFatal()})
       hRef.current=hls
-
     }else if(isHLS&&v.canPlayType('application/vnd.apple.mpegurl')){
-      // iOS Safari native HLS
-      // These must already be set by videoCallbackRef, but set again to be safe
+      // iOS native HLS
       v.setAttribute('playsinline','')
       v.setAttribute('webkit-playsinline','')
       v.removeAttribute('crossorigin')
       if(image) v.poster=image
-
       v.src=url
-      v.load()  // ← REQUIRED on iOS: without this, src assignment is ignored
-
+      v.load()
       const onMeta=()=>{
         setDur(v.duration||0)
-        // iOS: try to unmute and play
-        v.muted=false
-        v.play().catch(()=>{
-          // Autoplay blocked — need user tap
-          setTapPlay(true)
-        })
+        v.play().catch(()=>setTapPlay(true))
       }
       v.addEventListener('loadedmetadata',onMeta,{once:true})
       v.addEventListener('error',onFatal,{once:true})
-      return ()=>{
+      return()=>{
         v.removeEventListener('loadedmetadata',onMeta)
         v.removeEventListener('error',onFatal)
         if(hRef.current){hRef.current.destroy();hRef.current=null}
       }
-
     }else{
-      // Direct MP4
+      // Direct (MP4/MKV)
       v.removeAttribute('crossorigin')
       v.src=url;v.load()
       v.play().catch(()=>setTapPlay(true))
     }
     v.onerror=()=>onFatal()
-    return ()=>{if(hRef.current){hRef.current.destroy();hRef.current=null}}
-  },[cs])
+    return()=>{if(hRef.current){hRef.current.destroy();hRef.current=null}}
+  },[cs,forceMkv])
 
-  // ── Video events ─────────────────────────────────────────────────────
   useEffect(()=>{
     const v=vRef.current;if(!v) return
-    const onPlay=()=>{setPlaying(true);setTapPlay(false);setMuted(v.muted)}
+    const onPlay=()=>{setPlaying(true);setTapPlay(false)}
     const onPause=()=>setPlaying(false)
     const onTime=()=>{
       const c=v.currentTime,d=v.duration||0
@@ -260,129 +297,59 @@ export default function PlayerPage({params,navigate,goBack}) {
     v.addEventListener('play',onPlay);v.addEventListener('pause',onPause);v.addEventListener('timeupdate',onTime)
     v.addEventListener('ended',onEnd);v.addEventListener('durationchange',onDur)
     document.addEventListener('fullscreenchange',onFS);document.addEventListener('webkitfullscreenchange',onFS)
-    return ()=>{
+    return()=>{
       v.removeEventListener('play',onPlay);v.removeEventListener('pause',onPause);v.removeEventListener('timeupdate',onTime)
       v.removeEventListener('ended',onEnd);v.removeEventListener('durationchange',onDur)
       document.removeEventListener('fullscreenchange',onFS);document.removeEventListener('webkitfullscreenchange',onFS)
     }
   },[autoplay,epIdx,allEpisodes,K])
 
-  // ── Controls ──────────────────────────────────────────────────────────
-  const showReset=useCallback(()=>{
-    setShowUI(true);clearTimeout(hideT.current)
-    if(vRef.current&&!vRef.current.paused) hideT.current=setTimeout(()=>setShowUI(false),3500)
-  },[])
-
-  const togglePlay=useCallback(()=>{
-    const v=vRef.current;if(!v) return
-    v.paused?v.play().catch(()=>setTapPlay(true)):v.pause()
-    showReset()
-  },[showReset])
-
-  const seek=useCallback(e=>{
-    const v=vRef.current;if(!v?.duration) return
-    const r=pRef.current?.getBoundingClientRect();if(!r) return
-    const x=e.touches?.[0]?.clientX??e.clientX
-    v.currentTime=Math.max(0,Math.min(1,(x-r.left)/r.width))*v.duration
-    showReset()
-  },[showReset])
-
-  const skip=useCallback(s=>{
-    const v=vRef.current;if(!v) return
-    v.currentTime=Math.max(0,Math.min(v.duration||0,v.currentTime+s));showReset()
-  },[showReset])
-
-  const toggleMute=()=>{const v=vRef.current;if(!v) return;v.muted=!v.muted;setMuted(v.muted)}
-  const changeVol=val=>{const v=vRef.current;if(!v) return;const n=parseFloat(val);v.volume=n;setVol(n);if(n>0){v.muted=false;setMuted(false)}}
-  const toggleFS=()=>{const el=cRef.current;if(!el) return;fs?(document.exitFullscreen||document.webkitExitFullscreen)?.call(document):(el.requestFullscreen||el.webkitRequestFullscreen)?.call(el);showReset()}
-
-  const playNext=useCallback(()=>{
-    clearTimeout(nextT.current);setCdwn(null)
-    const ni=epIdx+1;if(ni>=allEpisodes.length) return
-    navigate('player',{...params,episodeTitle:allEpisodes[ni].title||`Episode ${ni+1}`,episodeIdx:ni,link:allEpisodes[ni].link})
-  },[epIdx,allEpisodes,navigate,params])
-
-  const playEp=(ep,i)=>{
-    setPanel(null);setEpIdx(i)
-    navigate('player',{...params,episodeTitle:ep.title||`Episode ${i+1}`,episodeIdx:i,link:ep.link})
-  }
-
-  // ── Click handler: close panel OR toggle play ─────────────────────────
-  const handleClick=useCallback(e=>{
-    // If click is inside the open panel, ignore
-    if(panelDivRef.current&&panelDivRef.current.contains(e.target)) return
-    // If panel is open and click is outside, just close panel
-    if(panel){setPanel(null);return}
-    togglePlay()
-  },[panel,togglePlay])
-
-  const handleTouch=useCallback(e=>{
-    if(panelDivRef.current&&panelDivRef.current.contains(e.target)) return
-    if(panel){setPanel(null);return}
-    showReset()
-  },[panel,showReset])
+  const showReset=useCallback(()=>{setShowUI(true);clearTimeout(hideT.current);if(vRef.current&&!vRef.current.paused)hideT.current=setTimeout(()=>setShowUI(false),3500)},[])
+  const togglePlay=useCallback(()=>{const v=vRef.current;if(!v)return;v.paused?v.play().catch(()=>setTapPlay(true)):v.pause();showReset()},[showReset])
+  const seek=useCallback(e=>{const v=vRef.current;if(!v?.duration)return;const r=pRef.current?.getBoundingClientRect();if(!r)return;const x=e.touches?.[0]?.clientX??e.clientX;v.currentTime=Math.max(0,Math.min(1,(x-r.left)/r.width))*v.duration;showReset()},[showReset])
+  const skip=useCallback(s=>{const v=vRef.current;if(!v)return;v.currentTime=Math.max(0,Math.min(v.duration||0,v.currentTime+s));showReset()},[showReset])
+  const toggleMute=()=>{const v=vRef.current;if(!v)return;v.muted=!v.muted;setMuted(v.muted)}
+  const changeVol=val=>{const v=vRef.current;if(!v)return;const n=parseFloat(val);v.volume=n;setVol(n);if(n>0){v.muted=false;setMuted(false)}}
+  const toggleFS=()=>{const el=cRef.current;if(!el)return;fs?(document.exitFullscreen||document.webkitExitFullscreen)?.call(document):(el.requestFullscreen||el.webkitRequestFullscreen)?.call(el);showReset()}
+  const playNext=useCallback(()=>{clearTimeout(nextT.current);setCdwn(null);const ni=epIdx+1;if(ni>=allEpisodes.length)return;navigate('player',{...params,episodeTitle:allEpisodes[ni].title||`Episode ${ni+1}`,episodeIdx:ni,link:allEpisodes[ni].link})},[epIdx,allEpisodes,navigate,params])
+  const playEp=(ep,i)=>{setPanel(null);setEpIdx(i);navigate('player',{...params,episodeTitle:ep.title||`Episode ${i+1}`,episodeIdx:i,link:ep.link})}
+  const handleClick=useCallback(e=>{if(panelRef.current?.contains(e.target))return;if(panel){setPanel(null);return}togglePlay()},[panel,togglePlay])
+  const handleTouch=useCallback(e=>{if(panelRef.current?.contains(e.target))return;if(panel){setPanel(null);return}showReset()},[panel,showReset])
 
   const sub=episodeTitle||seasonTitle||''
 
-  return (
+  return(
     <div style={{background:'#000',minHeight:'100dvh',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",color:'#fff'}}>
-
-      {/* ══ VIDEO AREA ══ */}
       <div ref={cRef} style={{position:'relative',background:'#000',width:'100%',aspectRatio:'16/9',maxHeight:fs?'100dvh':'56vw',overflow:'hidden',flexShrink:0}}
         onMouseMove={showReset} onTouchStart={handleTouch} onClick={handleClick}>
 
-        {/* iOS: use callback ref to set attrs before React renders props */}
-        <video ref={videoCallbackRef} poster={image||undefined}
-          style={{width:'100%',height:'100%',display:'block',background:'#000',objectFit:screen,filter:`brightness(${bright}%)`}}
-        />
+        <video ref={videoRef} poster={image||undefined}
+          style={{width:'100%',height:'100%',display:'block',background:'#000',objectFit:screen,filter:`brightness(${bright}%)`}}/>
 
-        {/* Loading */}
+        {/* iOS MKV warning */}
+        {mkvWarn&&<IOSMkvWarning stream={cs} onTryAnyway={()=>{setMkvWarn(false);setForceMkv(true)}} onBack={()=>(goBack?goBack():navigate('home'))}/>}
+
         {loading&&<div style={OVL}><div style={{textAlign:'center'}}><div style={{width:44,height:44,border:'3px solid rgba(255,255,255,.1)',borderTopColor:R,borderRadius:'50%',animation:'_s .8s linear infinite',margin:'0 auto'}}/><p style={{color:'rgba(255,255,255,.5)',fontSize:13,marginTop:14}}>Finding streams…</p></div></div>}
-
-        {/* Error */}
         {fErr&&!loading&&<div style={OVL}><div style={{textAlign:'center',padding:'0 24px'}}><div style={{fontSize:48,marginBottom:16}}>⚠️</div><p style={{color:'#f87171',fontSize:14,lineHeight:1.6,marginBottom:20}}>{fErr}</p><button onClick={()=>(goBack?goBack():navigate('home'))} style={{background:R,color:'#fff',border:'none',borderRadius:10,padding:'10px 22px',fontSize:14,fontWeight:700,cursor:'pointer'}}>← Go Back</button></div></div>}
-
-        {/* iOS tap to play */}
-        {tapPlay&&!loading&&!fErr&&(
-          <div style={OVL} onClick={e=>{e.stopPropagation();const v=vRef.current;if(v){v.muted=false;v.play().catch(()=>{})}}}>
-            <div style={{textAlign:'center'}}>
-              <div style={{width:80,height:80,borderRadius:'50%',background:'rgba(0,0,0,.6)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 14px',border:`2px solid rgba(255,255,255,.3)`}}>
-                <Ic.Play/>
-              </div>
-              <p style={{fontSize:15,color:'#fff',fontWeight:600}}>Tap to Play</p>
-              {IS_IOS&&<p style={{fontSize:12,color:'rgba(255,255,255,.5)',marginTop:6}}>iOS requires a tap to start</p>}
-            </div>
-          </div>
-        )}
-
-        {/* Video error notice */}
+        {tapPlay&&!loading&&!fErr&&!mkvWarn&&<div style={OVL} onClick={e=>{e.stopPropagation();const v=vRef.current;if(v){v.muted=false;v.play().catch(()=>{})}}}><div style={{textAlign:'center'}}><div style={{width:80,height:80,borderRadius:'50%',background:'rgba(0,0,0,.6)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 14px',border:'2px solid rgba(255,255,255,.3)'}}><Ic.Play/></div><p style={{fontSize:15,color:'#fff',fontWeight:600}}>Tap to Play</p>{IS_IOS&&<p style={{fontSize:12,color:'rgba(255,255,255,.5)',marginTop:6}}>Tap once to start</p>}</div></div>}
         {vErr&&!fErr&&<div style={{position:'absolute',top:12,left:'50%',transform:'translateX(-50%)',background:'rgba(0,0,0,.9)',color:'#fbbf24',fontSize:12,padding:'7px 18px',borderRadius:8,whiteSpace:'nowrap',zIndex:20,pointerEvents:'none'}}>{vErr}</div>}
-
-        {/* Skip intro */}
-        {skipBtn&&!loading&&!fErr&&<button onClick={e=>{e.stopPropagation();const v=vRef.current;if(v)v.currentTime=90;setSkipBtn(false)}} style={{position:'absolute',bottom:72,right:14,zIndex:25,background:'rgba(0,0,0,.85)',backdropFilter:'blur(8px)',border:'1.5px solid rgba(255,255,255,.3)',color:'#fff',borderRadius:8,padding:'9px 18px',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:7,WebkitTapHighlightColor:'transparent'}}>▶| Skip Intro</button>}
-
-        {/* Autoplay countdown */}
+        {skipBtn&&!loading&&!fErr&&<button onClick={e=>{e.stopPropagation();const v=vRef.current;if(v)v.currentTime=90;setSkipBtn(false)}} style={{position:'absolute',bottom:72,right:14,zIndex:25,background:'rgba(0,0,0,.85)',backdropFilter:'blur(8px)',border:'1.5px solid rgba(255,255,255,.3)',color:'#fff',borderRadius:8,padding:'9px 18px',fontSize:13,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',gap:7}}>▶| Skip Intro</button>}
         {cdwn!==null&&<div onClick={e=>e.stopPropagation()} style={{position:'absolute',bottom:72,right:14,zIndex:25,background:'rgba(0,0,0,.9)',border:'1px solid rgba(255,255,255,.15)',borderRadius:12,padding:'12px 16px',textAlign:'center',minWidth:160}}><p style={{fontSize:12,color:'rgba(255,255,255,.5)',marginBottom:10}}>Next in {cdwn}s</p><button onClick={e=>{e.stopPropagation();playNext()}} style={{background:R,color:'#fff',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,fontWeight:700,cursor:'pointer',width:'100%'}}>Play Now</button></div>}
 
-        {/* ── CONTROLS OVERLAY ── */}
+        {/* CONTROLS */}
         <div style={{position:'absolute',inset:0,zIndex:10,display:'flex',flexDirection:'column',justifyContent:'space-between',background:showUI?'linear-gradient(to bottom,rgba(0,0,0,.75) 0%,transparent 30%,transparent 65%,rgba(0,0,0,.88) 100%)':'transparent',opacity:showUI?1:0,pointerEvents:showUI?'auto':'none',transition:'opacity .3s ease'}}
           onClick={e=>e.stopPropagation()}>
-          {/* Top */}
           <div style={{display:'flex',alignItems:'center',padding:'10px 12px 0',gap:8}}>
             <button style={IB} onClick={()=>(goBack?goBack():navigate('home'))}><Ic.Back/></button>
-            <div style={{flex:1,display:'flex',justifyContent:'center'}}>
-              <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:18,letterSpacing:2}}>WELL<span style={{color:R}}>STREAMER</span></span>
-            </div>
+            <div style={{flex:1,display:'flex',justifyContent:'center'}}><span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:18,letterSpacing:2}}>WELL<span style={{color:R}}>STREAMER</span></span></div>
             <button style={{...IB,background:panel==='settings'?'rgba(255,255,255,.15)':'none'}} onClick={e=>{e.stopPropagation();setPanel(p=>p==='settings'?null:'settings')}}><Ic.Gear/></button>
             {K==='series'&&allEpisodes.length>0&&<button style={{...IB,background:panel==='episodes'?'rgba(255,255,255,.15)':'none'}} onClick={e=>{e.stopPropagation();setPanel(p=>p==='episodes'?null:'episodes')}}><Ic.Eps/></button>}
           </div>
-          {/* Centre */}
           <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',pointerEvents:'none'}}>
             <button style={{...IB,width:70,height:70,borderRadius:'50%',background:'rgba(0,0,0,.55)',backdropFilter:'blur(8px)',border:'2px solid rgba(255,255,255,.22)',pointerEvents:'auto'}} onClick={e=>{e.stopPropagation();togglePlay()}}>{playing?<Ic.Pause/>:<Ic.Play/>}</button>
             <div style={{position:'absolute',left:0,top:0,width:'35%',height:'100%',pointerEvents:'auto'}} onDoubleClick={e=>{e.stopPropagation();skip(-10)}}/>
             <div style={{position:'absolute',right:0,top:0,width:'35%',height:'100%',pointerEvents:'auto'}} onDoubleClick={e=>{e.stopPropagation();skip(10)}}/>
           </div>
-          {/* Bottom */}
           <div style={{padding:'0 12px 10px'}}>
             <div ref={pRef} style={{height:28,display:'flex',alignItems:'center',cursor:'pointer',touchAction:'none'}} onClick={e=>{e.stopPropagation();seek(e)}} onTouchStart={e=>{e.stopPropagation();seek(e)}} onTouchMove={e=>{e.stopPropagation();seek(e)}}>
               <div style={{position:'relative',width:'100%',height:4,background:'rgba(255,255,255,.2)',borderRadius:4}}>
@@ -408,14 +375,26 @@ export default function PlayerPage({params,navigate,goBack}) {
           </div>
         </div>
 
-        {/* ── SETTINGS PANEL ── */}
+        {/* SETTINGS */}
         {panel==='settings'&&(
-          <div ref={panelDivRef} style={{position:'absolute',top:0,right:0,bottom:0,width:220,background:'rgba(6,6,6,.97)',backdropFilter:'blur(20px)',borderLeft:'1px solid rgba(255,255,255,.08)',zIndex:30,display:'flex',flexDirection:'column'}}
+          <div ref={panelRef} style={{position:'absolute',top:0,right:0,bottom:0,width:220,background:'rgba(6,6,6,.97)',backdropFilter:'blur(20px)',borderLeft:'1px solid rgba(255,255,255,.08)',zIndex:30,display:'flex',flexDirection:'column'}}
             onClick={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()} onTouchEnd={e=>e.stopPropagation()}>
-            <div style={{padding:'14px 16px 10px',borderBottom:'1px solid rgba(255,255,255,.06)',flexShrink:0}}><p style={{fontSize:11,fontWeight:700,letterSpacing:1.3,textTransform:'uppercase',color:'rgba(255,255,255,.4)'}}>Settings</p></div>
+            <div style={{padding:'14px 16px 10px',borderBottom:'1px solid rgba(255,255,255,.06)',flexShrink:0}}>
+              <p style={{fontSize:11,fontWeight:700,letterSpacing:1.3,textTransform:'uppercase',color:'rgba(255,255,255,.4)'}}>Settings</p>
+              {IS_IOS&&<p style={{fontSize:11,color:'#fbbf24',marginTop:4}}>💡 Look for HLS streams — they work on iOS</p>}
+            </div>
             <div style={{flex:1,overflowY:'auto'}}>
-              <PS title="Quality">{groups.map(g=><PR key={g.quality} label={g.quality} active={selQ===g.quality} onClick={()=>{setSelQ(g.quality);setSelSrv(0);setVErr(null)}}/>)}</PS>
-              {cg?.streams.length>1&&<PS title="Server">{cg.streams.map((_,i)=><PR key={i} label={`Server ${i+1}`} active={selSrv===i} onClick={()=>{setSelSrv(i);setVErr(null)}}/>)}</PS>}
+              <PS title="Quality">{groups.map(g=>{
+                // Show HLS badge on iOS
+                const hasHLS=g.streams.some(s=>s.type==='hls'||s.link?.includes('.m3u8'))
+                return <PR key={g.quality} label={IS_IOS&&hasHLS?`${g.quality} ✓ HLS`:g.quality} active={selQ===g.quality} onClick={()=>{setSelQ(g.quality);setSelSrv(0);setVErr(null);setForceMkv(false)}}/>
+              })}</PS>
+              {cg?.streams.length>1&&<PS title="Server">{cg.streams.map((s,i)=>{
+                const isHLS=s.type==='hls'||s.link?.includes('.m3u8')
+                const isMkv=s.type==='mkv'||s.link?.includes('.mkv')
+                const badge=IS_IOS?(isHLS?' ✓':isMkv?' ✗ MKV':''):''
+                return <PR key={i} label={`Server ${i+1}${badge}`} active={selSrv===i} onClick={()=>{setSelSrv(i);setVErr(null);setForceMkv(false)}}/>
+              })}</PS>}
               {langs.length>0&&<PS title="🎧 Audio">{langs.map(l=><PR key={l} label={l} active={lang===l} onClick={()=>setLang(l)}/>)}</PS>}
               <PS title="Brightness"><div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 16px 12px'}}><input type="range" min={30} max={150} step={5} value={bright} onChange={e=>setBright(Number(e.target.value))} onClick={e=>e.stopPropagation()} style={{flex:1,accentColor:R}}/><span style={{fontSize:11,color:'rgba(255,255,255,.4)',minWidth:38}}>{bright}%</span></div></PS>
               <PS title="Screen"><PR label="Fit" active={screen==='contain'} onClick={()=>setScreen('contain')}/><PR label="Crop" active={screen==='cover'} onClick={()=>setScreen('cover')}/><PR label="Stretch" active={screen==='fill'} onClick={()=>setScreen('fill')}/></PS>
@@ -424,9 +403,9 @@ export default function PlayerPage({params,navigate,goBack}) {
           </div>
         )}
 
-        {/* ── EPISODE PANEL ── */}
+        {/* EPISODES */}
         {panel==='episodes'&&K==='series'&&(
-          <div ref={panelDivRef} style={{position:'absolute',top:0,right:0,bottom:0,width:240,background:'rgba(6,6,6,.97)',backdropFilter:'blur(20px)',borderLeft:'1px solid rgba(255,255,255,.08)',zIndex:30,display:'flex',flexDirection:'column'}}
+          <div ref={panelRef} style={{position:'absolute',top:0,right:0,bottom:0,width:240,background:'rgba(6,6,6,.97)',backdropFilter:'blur(20px)',borderLeft:'1px solid rgba(255,255,255,.08)',zIndex:30,display:'flex',flexDirection:'column'}}
             onClick={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()} onTouchEnd={e=>e.stopPropagation()}>
             <div style={{padding:'14px 16px 10px',borderBottom:'1px solid rgba(255,255,255,.06)',flexShrink:0}}><p style={{fontSize:11,fontWeight:700,letterSpacing:1.3,textTransform:'uppercase',color:'rgba(255,255,255,.4)'}}>Episodes</p></div>
             <div style={{flex:1,overflowY:'auto',padding:'8px 10px'}}>
@@ -442,12 +421,20 @@ export default function PlayerPage({params,navigate,goBack}) {
         )}
       </div>
 
-      {/* ══ INFO BELOW VIDEO ══ */}
+      {/* INFO BELOW */}
       {!loading&&!fErr&&(
         <div style={{background:'#0f0f0f',flex:1,padding:'14px 18px 32px',borderTop:'1px solid rgba(255,255,255,.05)'}}>
           <h2 style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:20,letterSpacing:1,marginBottom:3}}>{title}</h2>
           {sub&&<p style={{color:'rgba(255,255,255,.45)',fontSize:13,marginBottom:12}}>{sub}</p>}
           {vErr&&<p style={{color:'#fbbf24',fontSize:12,marginBottom:10}}>{vErr}</p>}
+
+          {/* iOS MKV warning banner */}
+          {IS_IOS&&isMkvStream&&!mkvWarn&&(
+            <div style={{background:'rgba(251,191,36,.1)',border:'1px solid rgba(251,191,36,.3)',borderRadius:10,padding:'10px 14px',marginBottom:14,fontSize:13,color:'#fbbf24'}}>
+              ⚠️ MKV streams may not play on iOS. Open Settings and look for <strong>HLS ✓</strong> servers.
+            </div>
+          )}
+
           {langs.length>0&&<div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:14}}>{langs.map(l=><span key={l} onClick={()=>setLang(l)} style={{padding:'4px 12px',borderRadius:20,fontSize:12,fontWeight:600,background:lang===l?`${R}20`:'rgba(255,255,255,.07)',color:lang===l?R:'rgba(255,255,255,.5)',border:`1px solid ${lang===l?R+'55':'rgba(255,255,255,.1)'}`,cursor:'pointer'}}>🎧 {l}</span>)}</div>}
           {K==='series'&&epIdx<allEpisodes.length-1&&<button onClick={playNext} style={{display:'inline-flex',alignItems:'center',gap:8,padding:'10px 18px',borderRadius:10,marginBottom:20,background:'rgba(255,255,255,.07)',border:'1px solid rgba(255,255,255,.12)',color:'#fff',fontSize:13,fontWeight:600,cursor:'pointer'}}><Ic.Next/>Next Episode</button>}
           {K==='series'&&allEpisodes.length>0&&(
@@ -456,7 +443,7 @@ export default function PlayerPage({params,navigate,goBack}) {
               <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:'50vh',overflowY:'auto'}}>
                 {allEpisodes.map((ep,i)=>{const cur=i===epIdx;return(
                   <div key={ep.link||i} onClick={()=>playEp(ep,i)} style={{display:'flex',alignItems:'center',gap:14,padding:'12px 14px',borderRadius:12,background:cur?`${R}18`:'rgba(255,255,255,.04)',border:`1px solid ${cur?R+'44':'rgba(255,255,255,.07)'}`,cursor:'pointer'}}>
-                    <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:cur?R:'rgba(255,255,255,.28)',minWidth:32}}>{String(i+1).padStart(2,'0')}</span>
+                    <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:22,color:cur?R:'rgba(255,255,255,.28)',minWidth:32}}>{String(i+1).padStart(2,'00')}</span>
                     <span style={{flex:1,fontSize:14,fontWeight:cur?600:400,color:cur?'#fff':'rgba(255,255,255,.65)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ep.title||`Episode ${i+1}`}</span>
                     {cur?<span style={{fontSize:11,color:R,fontWeight:700}}>▶ NOW</span>:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} width={14} height={14} style={{color:'rgba(255,255,255,.25)',flexShrink:0}}><polyline points="9 18 15 12 9 6"/></svg>}
                   </div>
