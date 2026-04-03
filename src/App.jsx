@@ -1,5 +1,7 @@
-// src/App.jsx — Fixed: no login required, anonymous guest, back button works
+// src/App.jsx
+// Fixed: wraps with AuthProvider (required by Navbar), no login wall, back button works
 import { useState, useCallback, useEffect } from 'react'
+import { AuthProvider } from './lib/auth.jsx'
 import { useProviders } from './lib/useProviders.js'
 import { Navbar } from './components/Navbar.jsx'
 import { Icons } from './components/Icons.jsx'
@@ -14,14 +16,10 @@ import HistoryPage   from './pages/HistoryPage.jsx'
 
 import './styles.css'
 
-// ── No login needed — everyone is guest ───────────────────────────────────
-const ANON = { username: 'guest' }
 const NAVBAR_PAGES = ['home', 'search', 'watchlist', 'history', 'providers']
+const pageStack = []  // back-button history
 
-// Page history stack for back button
-const pageStack = []
-
-export default function App() {
+function Shell() {
   const { installed } = useProviders()
   const [page,   setPage]   = useState('home')
   const [params, setParams] = useState({})
@@ -31,8 +29,7 @@ export default function App() {
     setPage(p)
     setParams(ps)
     window.scrollTo({ top: 0, behavior: 'smooth' })
-    // Push to browser history so Android back fires popstate
-    window.history.pushState({ page: p }, '')
+    window.history.pushState({ p }, '')
   }, [page, params])
 
   const goBack = useCallback(() => {
@@ -47,19 +44,19 @@ export default function App() {
     }
   }, [])
 
-  // Android hardware back button
+  // Android hardware back button — intercept popstate
   useEffect(() => {
+    window.history.pushState({ p: 'home' }, '')
     const onPop = () => {
       goBack()
-      // Re-push so next back still fires
-      window.history.pushState({ page }, '')
+      window.history.pushState({ p: page }, '')
     }
     window.addEventListener('popstate', onPop)
-    window.history.pushState({ page: 'home' }, '')
     return () => window.removeEventListener('popstate', onPop)
   }, [goBack, page])
 
   const showNav = NAVBAR_PAGES.includes(page)
+  const ANON = { username: 'guest' }
 
   return (
     <div className="app">
@@ -68,7 +65,6 @@ export default function App() {
 
       {showNav && <Navbar page={page} navigate={navigate} />}
 
-      {/* Mobile bottom navigation */}
       {showNav && (
         <nav className="bottom-nav">
           {[
@@ -99,11 +95,20 @@ export default function App() {
         {page === 'home'      && <HomePage      navigate={navigate} installed={installed} user={ANON} />}
         {page === 'search'    && <SearchPage    navigate={navigate} installed={installed} user={ANON} />}
         {page === 'info'      && <InfoPage      navigate={navigate} params={params}       user={ANON} goBack={goBack} />}
-        {page === 'player'    && <PlayerPage    navigate={navigate} params={params}       user={ANON} goBack={goBack} />}
+        {page === 'player'    && <PlayerPage    navigate={navigate} params={params}                    goBack={goBack} />}
         {page === 'providers' && <ProvidersPage navigate={navigate} />}
         {page === 'watchlist' && <WatchlistPage navigate={navigate} user={ANON} />}
         {page === 'history'   && <HistoryPage   navigate={navigate} user={ANON} />}
       </main>
     </div>
+  )
+}
+
+// AuthProvider wraps Shell so useAuth() calls in Navbar don't crash
+export default function App() {
+  return (
+    <AuthProvider>
+      <Shell />
+    </AuthProvider>
   )
 }
