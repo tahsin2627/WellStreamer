@@ -1,20 +1,31 @@
-// src/lib/auth.jsx — REPLACED: no login, always guest
-// Keeps AuthProvider and useAuth exports so other files don't crash if they import them
-
+// src/lib/auth.jsx
+// Anonymous auth — always logged in as guest.
+// Keeps ALL original exports so Navbar and other components don't crash.
 import { createContext, useContext } from 'react'
 
 const GUEST = { username: 'guest' }
-const AuthContext = createContext({ user: GUEST, logout: () => {} })
 
+const AuthCtx = createContext({
+  user:     GUEST,
+  login:    () => ({ ok: true }),
+  register: () => ({ ok: true }),
+  logout:   () => {},
+})
+
+// AuthProvider wraps the app — required because Navbar calls useAuth()
 export function AuthProvider({ children }) {
-  // Always authenticated as guest — no login needed
   return (
-    <AuthContext.Provider value={{ user: GUEST, logout: () => {}, login: () => ({ ok: true }), register: () => ({ ok: true }) }}>
+    <AuthCtx.Provider value={{
+      user:     GUEST,
+      login:    () => ({ ok: true }),
+      register: () => ({ ok: true }),
+      logout:   () => {},
+    }}>
       {children}
-    </AuthContext.Provider>
+    </AuthCtx.Provider>
   )
 }
 
 export function useAuth() {
-  return useContext(AuthContext)
+  return useContext(AuthCtx)
 }
