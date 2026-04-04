@@ -1,11 +1,9 @@
-// src/lib/providers.js
-// ALL calls go through /api/stream (Vercel serverless, Node.js)
-// This fixes: MoviesDrive search, stream extraction, meta, everything
-// No client-side cheerio/axios needed - server handles it all
+// src/lib/providers.js — All calls via /api/stream (Vercel Node.js)
+// providerValue: 'drive' = MoviesDrive, 'autoEmbed' = MultiStream
 
 const API = '/api/stream'
 
-async function callAPI(action, params) {
+async function call(action, params) {
   const res = await fetch(API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -16,45 +14,11 @@ async function callAPI(action, params) {
   return json.data
 }
 
-export async function getCatalog(providerValue) {
-  try {
-    return await callAPI('catalog', { providerValue })
-  } catch {
-    return { catalog: [], genres: [] }
-  }
-}
-
-export async function getPosts({ providerValue, filter, page, signal }) {
-  return callAPI('posts', { providerValue, filter, page: page || 1 })
-}
-
-export async function searchPosts({ providerValue, searchQuery, page, signal }) {
-  return callAPI('search', { providerValue, searchQuery, page: page || 1 })
-}
-
-export async function getMeta({ providerValue, link }) {
-  return callAPI('meta', { providerValue, link })
-}
-
-export async function getStream({ providerValue, link, type, signal }) {
-  return callAPI('stream', { providerValue, link, type })
-}
-
-export async function getEpisodes({ providerValue, url }) {
-  try {
-    return await callAPI('episodes', { providerValue, url })
-  } catch {
-    return []
-  }
-}
-
-// Kept for compatibility - no-op since API handles everything
-export async function fetchManifest() {
-  try {
-    return await callAPI('catalog', { providerValue: 'manifest' })
-  } catch {
-    return []
-  }
-}
-
-export async function installProvider() { /* no-op */ }
+export const getCatalog     = (pv)       => call('catalog', { providerValue: pv }).catch(() => ({ catalog: [], genres: [] }))
+export const getPosts        = ({providerValue,filter,page}) => call('posts',   { providerValue, filter, page })
+export const searchPosts     = ({providerValue,searchQuery,page}) => call('search', { providerValue, searchQuery, page })
+export const getMeta         = ({providerValue,link})  => call('meta',    { providerValue, link })
+export const getStream       = ({providerValue,link,type}) => call('stream', { providerValue, link, type })
+export const getEpisodes     = ({providerValue,url})   => call('episodes', { providerValue, url }).catch(() => [])
+export const fetchManifest   = () => Promise.resolve([])
+export const installProvider = () => Promise.resolve()
