@@ -1,7 +1,11 @@
 // src/App.jsx
+// MoviesDrive (primary) + Multistream (secondary) ONLY
+// Fetches exact provider names from manifest so no more 404s
+
 import { useState, useEffect, useCallback } from 'react'
 import { AuthProvider } from './lib/auth.jsx'
 import { providerStorage } from './lib/storage.js'
+import { fetchManifest } from './lib/providers.js'
 import { Navbar } from './components/Navbar.jsx'
 import { Icons } from './components/Icons.jsx'
 
@@ -14,28 +18,63 @@ import HistoryPage   from './pages/HistoryPage.jsx'
 
 import './styles.css'
 
-// ── Only these providers work reliably ───────────────────────────────────
-const WORKING_PROVIDERS = [
-  { value: 'MultiStream',   display_name: 'MultiStream',   type: 'global', icon: '' },
-  { value: 'MoviesDrive',   display_name: 'MoviesDrive',   type: 'global', icon: '' },
-  { value: 'VegaMovies',    display_name: 'VegaMovies',    type: 'global', icon: '' },
-  { value: 'MultiMovies',   display_name: 'MultiMovies',   type: 'global', icon: '' },
-  { value: 'HindiLinks4u',  display_name: 'HindiLinks4u',  type: 'global', icon: '' },
-]
+// ── Target provider display names (case-insensitive match against manifest) ───
+// MoviesDrive = primary, Multistream = secondary
+const TARGET_NAMES = ['MoviesDrive', 'Multistream']
 
-const ANON = { username: 'guest' }
 const NAVBAR = ['home', 'search', 'watchlist', 'history']
-const stack = []  // navigation history
+const ANON = { username: 'guest' }
+const stack = []
 
 function Shell() {
   const [page,      setPage]      = useState('home')
   const [params,    setParams]    = useState({})
-  const [providers, setProviders] = useState(WORKING_PROVIDERS)
+  const [providers, setProviders] = useState([])
+  const [provReady, setProvReady] = useState(false)
 
-  // Auto-install working providers on first load
+  // On mount: fetch manifest, resolve exact provider values, auto-install
   useEffect(() => {
-    providerStorage.setInstalled(WORKING_PROVIDERS)
-    setProviders(WORKING_PROVIDERS)
+    ;(async () => {
+      try {
+        const manifest = await fetchManifest()
+
+        // Find exact provider entries from manifest (case-insensitive)
+        const resolved = TARGET_NAMES
+          .map(name => manifest.find(p =>
+            p.value.toLowerCase() === name.toLowerCase() ||
+            p.display_name?.toLowerCase() === name.toLowerCase()
+          ))
+          .filter(Boolean)
+          .map(p => ({
+            value:        p.value,
+            display_name: p.display_name || p.value,
+            type:         p.type || 'global',
+            icon:         p.icon || '',
+          }))
+
+        if (resolved.length > 0) {
+          console.log('[App] Resolved providers:', resolved.map(p => p.value))
+          providerStorage.setInstalled(resolved)
+          setProviders(resolved)
+        } else {
+          // Manifest fetch failed or providers not found — use safe fallback names
+          // These are guesses; if wrong the module fetch will 404 but won't crash
+          console.warn('[App] Could not resolve from manifest, using fallback names')
+          const fallback = [
+            { value: 'MoviesDrive', display_name: 'MoviesDrive', type: 'global', icon: '' },
+            { value: 'Multistream', display_name: 'Multistream', type: 'global', icon: '' },
+          ]
+          providerStorage.setInstalled(fallback)
+          setProviders(fallback)
+        }
+      } catch (e) {
+        console.error('[App] Provider init failed:', e)
+        // Still show app even if providers fail
+        setProviders([])
+      } finally {
+        setProvReady(true)
+      }
+    })()
   }, [])
 
   const navigate = useCallback((p, ps = {}) => {
@@ -63,6 +102,19 @@ function Shell() {
 
   const showNav = NAVBAR.includes(page)
 
+  // Show loading state while resolving providers
+  if (!provReady) {
+    return (
+      <div style={{ background: '#000', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16 }}>
+        <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 28, letterSpacing: 3, color: '#fff' }}>
+          WELL<span style={{ color: '#e50914' }}>STREAMER</span>
+        </div>
+        <div style={{ width: 36, height: 36, border: '3px solid rgba(255,255,255,.1)', borderTopColor: '#e50914', borderRadius: '50%', animation: '_appspin .8s linear infinite' }} />
+        <style>{'@keyframes _appspin{to{transform:rotate(360deg)}}'}</style>
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <div className="ambient-orb orb-1" />
@@ -79,22 +131,24 @@ function Shell() {
             { id: 'history',   Icon: Icons.Clock  },
           ].map(({ id, Icon }) => (
             <button key={id} onClick={() => navigate(id)}
-              style={{ background:'none', border:'none', color: page===id ? 'var(--accent2)' : 'var(--muted)',
-                display:'flex', flexDirection:'column', alignItems:'center',
-                padding:'4px 16px', cursor:'pointer', fontFamily:'var(--font-body)' }}>
-              <span style={{ width:22, height:22 }}><Icon /></span>
+              style={{ background: 'none', border: 'none',
+                color: page === id ? 'var(--accent2)' : 'var(--muted)',
+                display: 'flex', flexDirection: 'column', alignItems: 'center',
+                padding: '4px 16px', cursor: 'pointer',
+                fontFamily: 'var(--font-body)' }}>
+              <span style={{ width: 22, height: 22 }}><Icon /></span>
             </button>
           ))}
         </nav>
       )}
 
       <main className={showNav ? 'with-navbar' : ''}>
-        {page==='home'      && <HomePage      navigate={navigate} installed={providers} user={ANON} />}
-        {page==='search'    && <SearchPage    navigate={navigate} installed={providers} user={ANON} />}
-        {page==='info'      && <InfoPage      navigate={navigate} params={params}       user={ANON} goBack={goBack} />}
-        {page==='player'    && <PlayerPage    navigate={navigate} params={params}                    goBack={goBack} />}
-        {page==='watchlist' && <WatchlistPage navigate={navigate} user={ANON} />}
-        {page==='history'   && <HistoryPage   navigate={navigate} user={ANON} />}
+        {page === 'home'      && <HomePage      navigate={navigate} installed={providers} user={ANON} />}
+        {page === 'search'    && <SearchPage    navigate={navigate} installed={providers} user={ANON} />}
+        {page === 'info'      && <InfoPage      navigate={navigate} params={params}       user={ANON} goBack={goBack} />}
+        {page === 'player'    && <PlayerPage    navigate={navigate} params={params}                    goBack={goBack} />}
+        {page === 'watchlist' && <WatchlistPage navigate={navigate} user={ANON} />}
+        {page === 'history'   && <HistoryPage   navigate={navigate} user={ANON} />}
       </main>
     </div>
   )
