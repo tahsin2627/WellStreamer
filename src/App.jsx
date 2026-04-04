@@ -17,6 +17,7 @@ import './styles.css'
 // ── Only these providers work reliably ───────────────────────────────────
 const WORKING_PROVIDERS = [
   { value: 'MultiStream',   display_name: 'MultiStream',   type: 'global', icon: '' },
+  { value: 'MoviesDrive',   display_name: 'MoviesDrive',   type: 'global', icon: '' },
   { value: 'VegaMovies',    display_name: 'VegaMovies',    type: 'global', icon: '' },
   { value: 'MultiMovies',   display_name: 'MultiMovies',   type: 'global', icon: '' },
   { value: 'HindiLinks4u',  display_name: 'HindiLinks4u',  type: 'global', icon: '' },
