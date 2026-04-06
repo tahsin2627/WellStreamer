@@ -271,38 +271,45 @@ async function autoEmbedEpisodes(link) {
 const MFBD = 'https://myflixbd.to'
 
 async function mfbdScrape(url) {
-  // Use WordPress REST API - bypasses bot protection completely
+  const base = 'https://myflixbd.to'
   try {
-    const base = 'https://myflixbd.to'
     let apiUrl
+    // Use _fields only (fast, no _embed overhead) + get yoast SEO image if available
+    const fields = '_fields=id,title,link,yoast_head_json'
+
     if (url.includes('/?s=')) {
-      const q = url.split('/?s=')[1]
-      apiUrl = `${base}/wp-json/wp/v2/posts?search=${q}&per_page=20&_embed=1`
+      const q = decodeURIComponent(url.split('/?s=')[1])
+      apiUrl = `${base}/wp-json/wp/v2/posts?search=${encodeURIComponent(q)}&per_page=20&${fields}`
     } else {
-      // Extract category slug from URL
       const catMatch = url.match(/\/genre\/([^/]+)/)
       const pageMatch = url.match(/\/page\/(\d+)/)
       const page = pageMatch ? pageMatch[1] : 1
       if (catMatch) {
-        // Get category ID first
         const catSlug = catMatch[1]
-        const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
-        const catId = catRes?.[0]?.id
-        if (catId) {
-          apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&per_page=20&page=${page}&_embed=1`
-        }
+        try {
+          const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
+          const catId = catRes?.[0]?.id
+          if (catId) {
+            apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&per_page=20&page=${page}&${fields}`
+          }
+        } catch {}
       }
       if (!apiUrl) {
-        apiUrl = `${base}/wp-json/wp/v2/posts?per_page=20&page=${page}&_embed=1`
+        apiUrl = `${base}/wp-json/wp/v2/posts?per_page=20&page=${page}&${fields}`
       }
     }
+
     const posts = await getJSON(apiUrl)
-    const results = (posts || []).map(p => ({
-      title: p.title?.rendered?.replace(/<[^>]+>/g,'') || '',
-      link: p.link || '',
-      image: p._embedded?.['wp:featuredmedia']?.[0]?.source_url || p._embedded?.['wp:featuredmedia']?.[0]?.media_details?.sizes?.medium_large?.source_url || '',
-    })).filter(p => p.title && p.link)
-    console.log(`[myflixbd] WP API: ${results.length} posts`)
+    const results = (posts || []).map(p => {
+      const title = p.title?.rendered?.replace(/<[^>]+>/g,'').trim() || ''
+      const link  = p.link || ''
+      // yoast_head_json has og:image which is the featured image
+      const image = p.yoast_head_json?.og_image?.[0]?.url ||
+                    p.yoast_head_json?.twitter_image || ''
+      return { title, link, image }
+    }).filter(p => p.title && p.link)
+
+    console.log(`[myflixbd] ${results.length} posts from WP API`)
     return results
   } catch (e) {
     console.error('[myflixbd] WP API error:', e.message)
