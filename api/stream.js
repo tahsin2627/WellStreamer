@@ -33,9 +33,9 @@ const CATALOGS = {
     { title:'Thriller', filter:'/category/triller' },
   ],
   autoEmbed: [
-    { title:'Trending Movies',  filter:'/catalog/movie/top.json' },
-    { title:'Popular Series',   filter:'/catalog/series/top.json' },
-    { title:'New on Netflix',   filter:'/catalog/movie/netflix-movies.json' },
+    { title:'Trending Movies', filter:'/catalog/movie/top.json' },
+    { title:'Popular Series',  filter:'/catalog/series/top.json' },
+    { title:'Top IMDB',        filter:'/catalog/movie/imdb-trending.json' },
   ],
   myflixbd: [
     { title:'Latest',        filter:'/' },
@@ -93,19 +93,30 @@ async function driveMeta(link) {
     const image = $('img.entered.lazyloaded,img.litespeed-loaded,.wp-post-image').attr('src') || $('img').first().attr('src') || ''
     const imdbId = ($('a:contains("IMDb")').attr('href') || '').split('/')[4] || ''
     const links = []
+    // Collect links grouped by quality heading
+    let curQ = ''
+    $('h3,h4,h5,strong,b').each((_, el) => {
+      const t = $(el).text()
+      const qm = t.match(/\b(4K|2160p?|1080p?|720p?|480p?)\b/i)
+      if (qm) curQ = qm[0].replace(/p$/i,'').toUpperCase().replace('2160','4K')
+    })
     $('a').each((_, el) => {
       const href = $(el).attr('href') || ''
       const text = $(el).text().trim()
-      if (!href || href === '#') return
-      if (href.includes('hubcloud') || href.includes('gdflix') || href.includes('vcloud') || href.includes('cf-dl')) {
-        const q = (text + href).match(/\b(480p?|720p?|1080p?|2160p?|4k)\b/i)?.[0] || ''
-        links.push({
-          title: text || q || 'Stream',
-          episodesLink: type === 'series' ? href : '',
-          directLinks: type === 'movie' ? [{ title: text||'Movie', link: href, type:'movie' }] : [],
-          quality: q.replace(/p$/i,''),
-        })
-      }
+      if (!href || href === '#' || href.startsWith('javascript')) return
+      const isStreamLink = href.includes('hubcloud') || href.includes('gdflix') ||
+                           href.includes('vcloud') || href.includes('cf-dl') ||
+                           href.includes('driveleech') || href.includes('drivebot') ||
+                           href.includes('instantdown') || href.includes('filepress')
+      if (!isStreamLink) return
+      const qm = (text + ' ' + href).match(/\b(4K|2160p?|1080p?|720p?|480p?)\b/i)
+      const q = qm ? qm[0].replace(/p$/i,'').toUpperCase().replace('2160','4K') : curQ || ''
+      links.push({
+        title: text || q || 'Stream',
+        episodesLink: type === 'series' ? href : '',
+        directLinks: type === 'movie' ? [{ title: text||'Movie', link: href, type:'movie' }] : [],
+        quality: q,
+      })
     })
     return { title, synopsis, image, imdbId, type, linkList: links }
   } catch (e) { console.error('[drive] meta:', e.message); return { title:'',synopsis:'',image:'',imdbId:'',type:'movie',linkList:[] } }
@@ -191,7 +202,7 @@ async function gdflix(link) {
 // ─── MULTISTREAM (autoEmbed via Stremio cinemeta) ────────────────────────────
 async function autoEmbedPosts(filter) {
   try {
-    const d = await getJSON('https://cinemeta-catalogs.strem.io' + filter)
+    const d = await getJSON('https://v3-cinemeta.strem.io' + filter)
     return (d?.metas || []).slice(0,20).map(m => ({
       title:m.name, link:`autoEmbed:${m.type}:${m.id}`, image:m.poster||''
     }))
@@ -266,7 +277,7 @@ async function mfbdScrape(url) {
     let apiUrl
     if (url.includes('/?s=')) {
       const q = url.split('/?s=')[1]
-      apiUrl = `${base}/wp-json/wp/v2/posts?search=${q}&per_page=20&_fields=id,title,link,featured_media_src_url,jetpack_featured_media_url`
+      apiUrl = `${base}/wp-json/wp/v2/posts?search=${q}&per_page=20&_embed=1`
     } else {
       // Extract category slug from URL
       const catMatch = url.match(/\/genre\/([^/]+)/)
@@ -278,18 +289,18 @@ async function mfbdScrape(url) {
         const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
         const catId = catRes?.[0]?.id
         if (catId) {
-          apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&per_page=20&page=${page}&_fields=id,title,link,featured_media_src_url,jetpack_featured_media_url`
+          apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&per_page=20&page=${page}&_embed=1`
         }
       }
       if (!apiUrl) {
-        apiUrl = `${base}/wp-json/wp/v2/posts?per_page=20&page=${page}&_fields=id,title,link,featured_media_src_url,jetpack_featured_media_url`
+        apiUrl = `${base}/wp-json/wp/v2/posts?per_page=20&page=${page}&_embed=1`
       }
     }
     const posts = await getJSON(apiUrl)
     const results = (posts || []).map(p => ({
       title: p.title?.rendered?.replace(/<[^>]+>/g,'') || '',
       link: p.link || '',
-      image: p.featured_media_src_url || p.jetpack_featured_media_url || '',
+      image: p._embedded?.['wp:featuredmedia']?.[0]?.source_url || p._embedded?.['wp:featuredmedia']?.[0]?.media_details?.sizes?.medium_large?.source_url || '',
     })).filter(p => p.title && p.link)
     console.log(`[myflixbd] WP API: ${results.length} posts`)
     return results
@@ -338,6 +349,33 @@ async function mfbdStream(link) {
 }
 
 // ─── HANDLER ─────────────────────────────────────────────────────────────────
+async function driveEpisodes(url) {
+  // For drive series, episodesLink is a hubcloud/gdflix page with episode links
+  // OR it's a season page on moviesdrive with episode links
+  try {
+    const html = await get(url)
+    const $ = load(html)
+    const eps = []
+    // Case 1: it's a moviesdrive season page with episode links
+    $('a').each((_, el) => {
+      const href = $(el).attr('href') || ''
+      const text = $(el).text().trim()
+      if (!href || href === '#') return
+      if ((text.match(/ep(isode)?\s*\d+|e\d+/i) || href.match(/ep(isode)?[-_]\d+/i)) && 
+          (href.includes('hubcloud') || href.includes('gdflix') || href.includes('driveleech'))) {
+        eps.push({ title: text || href.split('/').pop(), link: href })
+      }
+    })
+    if (eps.length) return eps
+    // Case 2: the url itself IS the stream link — return it as a single episode
+    if (url.includes('hubcloud') || url.includes('gdflix') || url.includes('driveleech')) {
+      return [{ title: 'Episode 1', link: url }]
+    }
+    return []
+  } catch { return [] }
+}
+
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
@@ -391,7 +429,7 @@ export default async function handler(req, res) {
       else if (pv === 'myflixbd')  result = await mfbdStream(link)
 
     } else if (action === 'episodes') {
-      if (pv === 'drive')     result = []
+      if (pv === 'drive')     result = await driveEpisodes(url)
       else if (pv === 'autoEmbed') result = await autoEmbedEpisodes(url)
       else if (pv === 'myflixbd')  result = []
 
