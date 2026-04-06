@@ -153,12 +153,21 @@ async function hubcloud(link) {
     $2('.btn-success.btn-lg.h6,.btn-danger,.btn-secondary').each((_, el) => {
       const href = $2(el).attr('href') || ''
       if (!href) return
-      if      (href.includes('pixeld') && !href.includes('api')) { const t=href.split('/').pop(),b=href.split('/').slice(0,-2).join('/'); out.push({server:'Pixeldrain',link:`${b}/api/file/${t}`,type:'mkv'}) }
-      else if (href.includes('.dev') && !href.includes('/?id=')) out.push({server:'Cf Worker',link:href,type:'mkv'})
-      else if (href.includes('hubcloud')||href.includes('/?id=')) out.push({server:'HubCloud',link:href,type:'mkv'})
-      else if (href.includes('cloudflarestorage')) out.push({server:'CfStorage',link:href,type:'mkv'})
-      else if (href.includes('hubcdn')) out.push({server:'HubCdn',link:href,type:'mkv'})
-      else if (href.includes('.mkv')||href.includes('?token=')) out.push({server:'Direct',link:href,type:'mkv'})
+      if (href.includes('pixeld')) {
+        // Convert to pixeldrain embed player
+        const id = href.split('/').pop().split('?')[0]
+        out.push({server:'Pixeldrain',link:`https://pixeldrain.com/u/${id}`,type:'embed'})
+      } else if (href.includes('.dev') && !href.includes('/?id=')) {
+        out.push({server:'Cf Worker',link:href,type:'embed'})
+      } else if (href.includes('hubcloud')||href.includes('/?id=')) {
+        out.push({server:'HubCloud',link:href,type:'embed'})
+      } else if (href.includes('cloudflarestorage')) {
+        out.push({server:'CfStorage',link:href,type:'embed'})
+      } else if (href.includes('hubcdn')) {
+        out.push({server:'HubCdn',link:href,type:'embed'})
+      } else if (href.includes('.mkv')||href.includes('?token=')) {
+        out.push({server:'Direct',link:href,type:'embed'})
+      }
     })
     return out
   } catch (e) { console.error('[hubcloud]', e.message); return [] }
@@ -251,28 +260,43 @@ async function autoEmbedEpisodes(link) {
 const MFBD = 'https://myflixbd.to'
 
 async function mfbdScrape(url) {
+  // Use WordPress REST API - bypasses bot protection completely
   try {
-    const html = await get(url)
-    const $ = load(html)
-    const posts = []
-    // Try all likely selectors for this WordPress theme
-    const tried = new Set()
-    for (const sel of ['article.type-post','article.type-movie','.post-item','.movie-item','article','.item']) {
-      $(sel).each((_, el) => {
-        const $el = $(el)
-        const link = $el.find('h2 a,h3 a,.entry-title a,.post-title a').attr('href') ||
-                     $el.find('a').first().attr('href') || ''
-        if (!link || tried.has(link)) return
-        tried.add(link)
-        const title = ($el.find('.entry-title,h2,h3,.title').first().text() || $el.find('img').attr('alt') || '').trim()
-        const image = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src') || $el.find('img').first().attr('data-lazy-src') || ''
-        if (title && link && link.includes('myflixbd')) posts.push({ title: title.replace(/\s*Download.*/i,'').trim(), link, image })
-      })
-      if (posts.length > 0) break
+    const base = 'https://myflixbd.to'
+    let apiUrl
+    if (url.includes('/?s=')) {
+      const q = url.split('/?s=')[1]
+      apiUrl = `${base}/wp-json/wp/v2/posts?search=${q}&per_page=20&_fields=id,title,link,featured_media_src_url,jetpack_featured_media_url`
+    } else {
+      // Extract category slug from URL
+      const catMatch = url.match(/\/genre\/([^/]+)/)
+      const pageMatch = url.match(/\/page\/(\d+)/)
+      const page = pageMatch ? pageMatch[1] : 1
+      if (catMatch) {
+        // Get category ID first
+        const catSlug = catMatch[1]
+        const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
+        const catId = catRes?.[0]?.id
+        if (catId) {
+          apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&per_page=20&page=${page}&_fields=id,title,link,featured_media_src_url,jetpack_featured_media_url`
+        }
+      }
+      if (!apiUrl) {
+        apiUrl = `${base}/wp-json/wp/v2/posts?per_page=20&page=${page}&_fields=id,title,link,featured_media_src_url,jetpack_featured_media_url`
+      }
     }
-    console.log(`[myflixbd] ${posts.length} from ${url}`)
-    return posts
-  } catch (e) { console.error('[myflixbd] scrape:', e.message); return [] }
+    const posts = await getJSON(apiUrl)
+    const results = (posts || []).map(p => ({
+      title: p.title?.rendered?.replace(/<[^>]+>/g,'') || '',
+      link: p.link || '',
+      image: p.featured_media_src_url || p.jetpack_featured_media_url || '',
+    })).filter(p => p.title && p.link)
+    console.log(`[myflixbd] WP API: ${results.length} posts`)
+    return results
+  } catch (e) {
+    console.error('[myflixbd] WP API error:', e.message)
+    return []
+  }
 }
 
 async function mfbdMeta(link) {
