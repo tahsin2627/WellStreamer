@@ -30,6 +30,68 @@ const I = {
 
 // ── Logo component ────────────────────────────────────────────────────────
 function Logo() {
+  // ── Embed mode: full-page iframe (no WellStreamer player overlay) ──
+  const isEmbedStream = !loading && !fetchErr && curStream && (
+    curStream.type === 'embed' ||
+    curStream.link?.includes('vidsrc') ||
+    curStream.link?.includes('autoembed') ||
+    curStream.link?.includes('multiembed') ||
+    curStream.link?.includes('pixeldrain.com/u/')
+  )
+
+  if (isEmbedStream) {
+    return (
+      <div style={{ background: '#000', minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
+        {/* Thin top bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+          background: '#0a0a0a', borderBottom: '1px solid rgba(255,255,255,.06)', flexShrink: 0 }}>
+          <button onClick={goBack || (() => navigate('home'))}
+            style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 6, display: 'flex' }}>
+            <I.Back />
+          </button>
+          <span style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 16, letterSpacing: 2, flex: 1,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            WELL<span style={{ color: '#e50914' }}>STREAMER</span>
+            {title ? ` — ${title}` : ''}
+          </span>
+          {curGroup?.streams?.length > 1 && (
+            <select value={selSrv} onChange={e => setSelSrv(Number(e.target.value))}
+              style={{ background: '#222', color: '#fff', border: '1px solid rgba(255,255,255,.2)',
+                borderRadius: 6, padding: '4px 8px', fontSize: 12, cursor: 'pointer' }}>
+              {curGroup.streams.map((s, i) => (
+                <option key={i} value={i}>{s.server || `Server ${i + 1}`}</option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {/* Full iframe */}
+        <div style={{ flex: 1, position: 'relative', background: '#000' }}>
+          <iframe
+            key={curStream.link}
+            src={curStream.link}
+            allowFullScreen
+            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 'none' }}
+          />
+        </div>
+
+        {/* Open in browser link */}
+        <div style={{ padding: '10px 16px', background: '#0a0a0a', borderTop: '1px solid rgba(255,255,255,.06)',
+          display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,.35)', flex: 1 }}>
+            Tip: if ads block playback, tap Open in Browser
+          </span>
+          <a href={curStream.link} target="_blank" rel="noreferrer"
+            style={{ fontSize: 12, color: '#e50914', textDecoration: 'none', fontWeight: 700,
+              padding: '6px 14px', border: '1px solid #e50914', borderRadius: 20, whiteSpace: 'nowrap' }}>
+            ↗ Open
+          </a>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:18, letterSpacing:2, pointerEvents:'none' }}>
       WELL<span style={{ color:'#e50914' }}>STREAMER</span>
@@ -436,26 +498,6 @@ export default function PlayerPage({ params, navigate, user, goBack }) {
           if (!panel) togglePlay()
         }}
       >
-        {/* ── Embed iframe overlay — for MultiStream (VidSrc, AutoEmbed etc.) ── */}
-        {curStream && (
-          curStream.type === 'embed' ||
-          curStream.link?.includes('vidsrc') ||
-          curStream.link?.includes('autoembed') ||
-          curStream.link?.includes('multiembed') ||
-          curStream.link?.includes('pixeldrain.com/u/')
-        ) && !loading && !fetchErr && (
-          <div style={{ position: 'absolute', inset: 0, zIndex: 5, background: '#000' }}>
-            <iframe
-              key={curStream.link}
-              src={curStream.link}
-              allowFullScreen
-              allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-              style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
-            />
-            {/* Open in browser fallback below the video area */}
-          </div>
-        )}
-
         {/* Video element */}
         <video
           ref={videoRef}
