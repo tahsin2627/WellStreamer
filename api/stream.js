@@ -93,31 +93,40 @@ async function driveMeta(link) {
     const image = $('img.entered.lazyloaded,img.litespeed-loaded,.wp-post-image').attr('src') || $('img').first().attr('src') || ''
     const imdbId = ($('a:contains("IMDb")').attr('href') || '').split('/')[4] || ''
     const links = []
-    // Collect links grouped by quality heading
-    let curQ = ''
-    $('h3,h4,h5,strong,b').each((_, el) => {
-      const t = $(el).text()
-      const qm = t.match(/\b(4K|2160p?|1080p?|720p?|480p?)\b/i)
-      if (qm) curQ = qm[0].replace(/p$/i,'').toUpperCase().replace('2160','4K')
-    })
-    $('a').each((_, el) => {
+    // Match by link TEXT containing quality keywords (exact same logic as vega-providers)
+    // MoviesDrive: <h5>Section</h5> <a href="hubcloud_url">Download 1080p</a>
+    $('a:contains("1080"):not(:contains("Zip")), a:contains("720"):not(:contains("Zip")), a:contains("480"):not(:contains("Zip")), a:contains("2160"):not(:contains("Zip")), a:contains("4k"):not(:contains("Zip"))').each((_, el) => {
       const href = $(el).attr('href') || ''
-      const text = $(el).text().trim()
-      if (!href || href === '#' || href.startsWith('javascript')) return
-      const isStreamLink = href.includes('hubcloud') || href.includes('gdflix') ||
-                           href.includes('vcloud') || href.includes('cf-dl') ||
-                           href.includes('driveleech') || href.includes('drivebot') ||
-                           href.includes('instantdown') || href.includes('filepress')
-      if (!isStreamLink) return
-      const qm = (text + ' ' + href).match(/\b(4K|2160p?|1080p?|720p?|480p?)\b/i)
-      const q = qm ? qm[0].replace(/p$/i,'').toUpperCase().replace('2160','4K') : curQ || ''
+      if (!href || href === '#') return
+      const title2 = $(el).parent('h5').prev().text() || $(el).closest('p,div').prev('h5,h4,h3').text() || $(el).text().trim()
+      const qm = title2.match(/\b(480p|720p|1080p|2160p)\b/i)
+      const quality = qm ? qm[0] : ''
+      if (!title2 || !href) return
       links.push({
-        title: text || q || 'Stream',
+        title: title2,
         episodesLink: type === 'series' ? href : '',
-        directLinks: type === 'movie' ? [{ title: text||'Movie', link: href, type:'movie' }] : [],
-        quality: q,
+        directLinks: type === 'movie' ? [{ title: 'Movie', link: href, type: 'movie' }] : [],
+        quality: quality,
       })
     })
+    // Also catch any remaining hubcloud/gdflix links not caught above
+    if (links.length === 0) {
+      $('a').each((_, el) => {
+        const href = $(el).attr('href') || ''
+        const text = $(el).text().trim()
+        if (!href || href === '#') return
+        if (href.includes('hubcloud') || href.includes('gdflix') || href.includes('driveleech') || href.includes('drivebot')) {
+          const qm = (text + href).match(/\b(4K|2160p?|1080p?|720p?|480p?)\b/i)
+          const q = qm ? qm[0] : ''
+          links.push({
+            title: text || q || 'Stream',
+            episodesLink: type === 'series' ? href : '',
+            directLinks: type === 'movie' ? [{ title: text||'Movie', link: href, type:'movie' }] : [],
+            quality: q,
+          })
+        }
+      })
+    }
     return { title, synopsis, image, imdbId, type, linkList: links }
   } catch (e) { console.error('[drive] meta:', e.message); return { title:'',synopsis:'',image:'',imdbId:'',type:'movie',linkList:[] } }
 }
@@ -272,47 +281,46 @@ const MFBD = 'https://myflixbd.to'
 
 async function mfbdScrape(url) {
   const base = 'https://myflixbd.to'
+  
+  // Helper: fetch posts from WP REST API and extract image from yoast or _embedded
+  async function fetchPosts(apiUrl) {
+    const posts = await getJSON(apiUrl)
+    return (posts || []).map(p => ({
+      title: (p.title?.rendered || '').replace(/<[^>]+>/g,'').trim(),
+      link:  p.link || '',
+      image: p.yoast_head_json?.og_image?.[0]?.url ||
+             p.yoast_head_json?.twitter_image ||
+             p._embedded?.['wp:featuredmedia']?.[0]?.source_url || '',
+    })).filter(p => p.title && p.link)
+  }
+
   try {
+    const fields = '_fields=id,title,link,yoast_head_json&per_page=15'
     let apiUrl
-    // Use _fields only (fast, no _embed overhead) + get yoast SEO image if available
-    const fields = '_fields=id,title,link,yoast_head_json'
 
     if (url.includes('/?s=')) {
       const q = decodeURIComponent(url.split('/?s=')[1])
-      apiUrl = `${base}/wp-json/wp/v2/posts?search=${encodeURIComponent(q)}&per_page=20&${fields}`
+      apiUrl = `${base}/wp-json/wp/v2/posts?search=${encodeURIComponent(q)}&${fields}`
     } else {
       const catMatch = url.match(/\/genre\/([^/]+)/)
       const pageMatch = url.match(/\/page\/(\d+)/)
       const page = pageMatch ? pageMatch[1] : 1
       if (catMatch) {
         const catSlug = catMatch[1]
-        try {
-          const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
-          const catId = catRes?.[0]?.id
-          if (catId) {
-            apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&per_page=20&page=${page}&${fields}`
-          }
-        } catch {}
+        const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
+        const catId = catRes?.[0]?.id
+        if (catId) {
+          apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&page=${page}&${fields}`
+        }
       }
-      if (!apiUrl) {
-        apiUrl = `${base}/wp-json/wp/v2/posts?per_page=20&page=${page}&${fields}`
-      }
+      if (!apiUrl) apiUrl = `${base}/wp-json/wp/v2/posts?page=${page}&${fields}`
     }
 
-    const posts = await getJSON(apiUrl)
-    const results = (posts || []).map(p => {
-      const title = p.title?.rendered?.replace(/<[^>]+>/g,'').trim() || ''
-      const link  = p.link || ''
-      // yoast_head_json has og:image which is the featured image
-      const image = p.yoast_head_json?.og_image?.[0]?.url ||
-                    p.yoast_head_json?.twitter_image || ''
-      return { title, link, image }
-    }).filter(p => p.title && p.link)
-
-    console.log(`[myflixbd] ${results.length} posts from WP API`)
+    const results = await fetchPosts(apiUrl)
+    console.log(`[myflixbd] ${results.length} posts`)
     return results
   } catch (e) {
-    console.error('[myflixbd] WP API error:', e.message)
+    console.error('[myflixbd] error:', e.message)
     return []
   }
 }
