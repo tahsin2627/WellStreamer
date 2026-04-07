@@ -104,8 +104,10 @@ async function driveMeta(link) {
       if (!title2 || !href) return
       links.push({
         title: title2,
-        episodesLink: type === 'series' ? href : '',
-        directLinks: type === 'movie' ? [{ title: 'Movie', link: href, type: 'movie' }] : [],
+        // Always use directLinks — MoviesDrive links are direct stream/download links
+        // NOT episode-index pages. episodesLink would make InfoPage call getEpisodes() → []
+        episodesLink: '',
+        directLinks: [{ title: title2 || 'Stream', link: href, type: type }],
         quality: quality,
       })
     })
@@ -120,8 +122,8 @@ async function driveMeta(link) {
           const q = qm ? qm[0] : ''
           links.push({
             title: text || q || 'Stream',
-            episodesLink: type === 'series' ? href : '',
-            directLinks: type === 'movie' ? [{ title: text||'Movie', link: href, type:'movie' }] : [],
+            episodesLink: '',
+            directLinks: [{ title: text || q || 'Stream', link: href, type: type }],
             quality: q,
           })
         }
@@ -300,18 +302,31 @@ async function mfbdScrape(url) {
 
     if (url.includes('/?s=')) {
       const q = decodeURIComponent(url.split('/?s=')[1])
+      // Try 'movie' custom post type first, fallback to 'posts'
+      try {
+        const r1 = await fetchPosts(`${base}/wp-json/wp/v2/movie?search=${encodeURIComponent(q)}&${fields}`)
+        if (r1.length) { console.log(`[myflixbd] ${r1.length} movie posts`); return r1 }
+      } catch {}
       apiUrl = `${base}/wp-json/wp/v2/posts?search=${encodeURIComponent(q)}&${fields}`
     } else {
       const catMatch = url.match(/\/genre\/([^/]+)/)
       const pageMatch = url.match(/\/page\/(\d+)/)
       const page = pageMatch ? pageMatch[1] : 1
+      // Try 'movie' CPT first
+      try {
+        const movieUrl = catMatch
+          ? `${base}/wp-json/wp/v2/movie?page=${page}&${fields}`
+          : `${base}/wp-json/wp/v2/movie?page=${page}&${fields}`
+        const r1 = await fetchPosts(movieUrl)
+        if (r1.length) { console.log(`[myflixbd] ${r1.length} movie posts`); return r1 }
+      } catch {}
       if (catMatch) {
         const catSlug = catMatch[1]
-        const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
-        const catId = catRes?.[0]?.id
-        if (catId) {
-          apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&page=${page}&${fields}`
-        }
+        try {
+          const catRes = await getJSON(`${base}/wp-json/wp/v2/categories?slug=${catSlug}&_fields=id`)
+          const catId = catRes?.[0]?.id
+          if (catId) apiUrl = `${base}/wp-json/wp/v2/posts?categories=${catId}&page=${page}&${fields}`
+        } catch {}
       }
       if (!apiUrl) apiUrl = `${base}/wp-json/wp/v2/posts?page=${page}&${fields}`
     }
