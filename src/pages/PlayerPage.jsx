@@ -30,68 +30,6 @@ const I = {
 
 // ── Logo component ────────────────────────────────────────────────────────
 function Logo() {
-  // ── Embed mode: full-page iframe (no WellStreamer player overlay) ──
-  const isEmbedStream = !loading && !fetchErr && curStream && (
-    curStream.type === 'embed' ||
-    curStream.link?.includes('vidsrc') ||
-    curStream.link?.includes('autoembed') ||
-    curStream.link?.includes('multiembed') ||
-    curStream.link?.includes('pixeldrain.com/u/')
-  )
-
-  if (isEmbedStream) {
-    return (
-      <div style={{ background: '#000', minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
-        {/* Thin top bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-          background: '#0a0a0a', borderBottom: '1px solid rgba(255,255,255,.06)', flexShrink: 0 }}>
-          <button onClick={goBack || (() => navigate('home'))}
-            style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: 6, display: 'flex' }}>
-            <I.Back />
-          </button>
-          <span style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 16, letterSpacing: 2, flex: 1,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            WELL<span style={{ color: '#e50914' }}>STREAMER</span>
-            {title ? ` — ${title}` : ''}
-          </span>
-          {curGroup?.streams?.length > 1 && (
-            <select value={selSrv} onChange={e => setSelSrv(Number(e.target.value))}
-              style={{ background: '#222', color: '#fff', border: '1px solid rgba(255,255,255,.2)',
-                borderRadius: 6, padding: '4px 8px', fontSize: 12, cursor: 'pointer' }}>
-              {curGroup.streams.map((s, i) => (
-                <option key={i} value={i}>{s.server || `Server ${i + 1}`}</option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        {/* Full iframe */}
-        <div style={{ flex: 1, position: 'relative', background: '#000' }}>
-          <iframe
-            key={curStream.link}
-            src={curStream.link}
-            allowFullScreen
-            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 'none' }}
-          />
-        </div>
-
-        {/* Open in browser link */}
-        <div style={{ padding: '10px 16px', background: '#0a0a0a', borderTop: '1px solid rgba(255,255,255,.06)',
-          display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-          <span style={{ fontSize: 12, color: 'rgba(255,255,255,.35)', flex: 1 }}>
-            Tip: if ads block playback, tap Open in Browser
-          </span>
-          <a href={curStream.link} target="_blank" rel="noreferrer"
-            style={{ fontSize: 12, color: '#e50914', textDecoration: 'none', fontWeight: 700,
-              padding: '6px 14px', border: '1px solid #e50914', borderRadius: 20, whiteSpace: 'nowrap' }}>
-            ↗ Open
-          </a>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:18, letterSpacing:2, pointerEvents:'none' }}>
       WELL<span style={{ color:'#e50914' }}>STREAMER</span>
@@ -466,6 +404,85 @@ export default function PlayerPage({ params, navigate, user, goBack }) {
       episodeIdx: i,
       link: ep.link,
     })
+  }
+
+  // ── Embed mode: clean iframe player, no WellStreamer overlay blocking clicks ──
+  if (!loading && !fetchErr && curStream) {
+    const isEmbed = curStream.type === 'embed' ||
+      curStream.link?.includes('vidsrc') ||
+      curStream.link?.includes('autoembed') ||
+      curStream.link?.includes('multiembed') ||
+      curStream.link?.includes('pixeldrain.com/u/')
+
+    if (isEmbed) {
+      return (
+        <div style={{ background:'#000', minHeight:'100dvh', display:'flex', flexDirection:'column', fontFamily:"'DM Sans',sans-serif", color:'#fff' }}>
+          {/* Top bar */}
+          <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', background:'#0a0a0a', borderBottom:'1px solid rgba(255,255,255,.07)', flexShrink:0 }}>
+            <button onClick={goBack || (()=>navigate('home'))}
+              style={{ background:'none', border:'none', color:'#fff', cursor:'pointer', padding:6, display:'flex', WebkitTapHighlightColor:'transparent' }}>
+              <I.Back />
+            </button>
+            <span style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:17, letterSpacing:2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              WELL<span style={{ color:'#e50914' }}>STREAMER</span>
+              {title ? ` — ${title}` : ''}
+            </span>
+          </div>
+
+          {/* Server chips */}
+          {curGroup?.streams?.length > 1 && (
+            <div style={{ display:'flex', gap:8, padding:'8px 12px', background:'#0a0a0a', borderBottom:'1px solid rgba(255,255,255,.05)', overflowX:'auto', flexShrink:0 }}>
+              {curGroup.streams.map((s,i) => (
+                <button key={i} onClick={()=>setSelSrv(i)}
+                  style={{ flexShrink:0, padding:'6px 14px', borderRadius:20, fontSize:12, fontWeight:600, cursor:'pointer', WebkitTapHighlightColor:'transparent',
+                    border:`1.5px solid ${selSrv===i?'#e50914':'rgba(255,255,255,.15)'}`,
+                    background:selSrv===i?'rgba(229,9,20,.15)':'transparent',
+                    color:selSrv===i?'#e50914':'rgba(255,255,255,.6)' }}>
+                  {s.server || `Server ${i+1}`}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Quality chips */}
+          {groups.length > 1 && (
+            <div style={{ display:'flex', gap:8, padding:'6px 12px', background:'#0a0a0a', borderBottom:'1px solid rgba(255,255,255,.04)', overflowX:'auto', flexShrink:0 }}>
+              {groups.map(g => (
+                <button key={g.quality} onClick={()=>{setSelQ(g.quality);setSelSrv(0)}}
+                  style={{ flexShrink:0, padding:'4px 12px', borderRadius:20, fontSize:11, fontWeight:600, cursor:'pointer', WebkitTapHighlightColor:'transparent',
+                    border:`1.5px solid ${selQ===g.quality?'rgba(255,255,255,.5)':'rgba(255,255,255,.1)'}`,
+                    background:selQ===g.quality?'rgba(255,255,255,.1)':'transparent',
+                    color:selQ===g.quality?'#fff':'rgba(255,255,255,.4)' }}>
+                  {g.quality}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Fullscreen iframe */}
+          <div style={{ flex:1, position:'relative', background:'#000', minHeight:0 }}>
+            <iframe
+              key={curStream.link}
+              src={curStream.link}
+              allowFullScreen
+              allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+              style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none', display:'block' }}
+            />
+          </div>
+
+          {/* Footer */}
+          <div style={{ padding:'8px 14px', background:'#0a0a0a', borderTop:'1px solid rgba(255,255,255,.05)', display:'flex', alignItems:'center', gap:12, flexShrink:0 }}>
+            <span style={{ fontSize:11, color:'rgba(255,255,255,.3)', flex:1 }}>
+              If player doesn't load tap Open
+            </span>
+            <a href={curStream.link} target="_blank" rel="noreferrer"
+              style={{ fontSize:12, color:'#e50914', textDecoration:'none', fontWeight:700, padding:'5px 14px', border:'1px solid #e50914', borderRadius:20, whiteSpace:'nowrap' }}>
+              ↗ Open
+            </a>
+          </div>
+        </div>
+      )
+    }
   }
 
   // ── Render ────────────────────────────────────────────────────────────
