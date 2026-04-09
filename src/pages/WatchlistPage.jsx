@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { watchlistStorage } from '../lib/storage.js'
-import { useAuth } from '../lib/auth.jsx'
+import { useAuth } from '../lib/auth.js'
 import { MediaCard } from '../components/MediaCard.jsx'
 import { Icons } from '../components/Icons.jsx'
 
