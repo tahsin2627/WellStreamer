@@ -17,7 +17,6 @@ export function Navbar({ page, navigate }) {
       <div className="navbar-logo" onClick={() => navigate('home')}>
         WELL<span>STREAMER</span>
       </div>
-
       <div className="navbar-links">
         {NAV.map(({ id, label, Icon }) => (
           <button
@@ -30,7 +29,6 @@ export function Navbar({ page, navigate }) {
           </button>
         ))}
       </div>
-
       <div className="navbar-user">
         <div className="user-avatar" title={user?.username}>
           {user?.username?.[0]?.toUpperCase()}
