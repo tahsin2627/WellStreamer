@@ -32,31 +32,14 @@ export default function HistoryPage({ navigate }) {
           <h1 className="page-title">Watch History</h1>
           <p className="page-sub">{items.length} title{items.length !== 1 ? 's' : ''} watched</p>
         </div>
-        {items.length > 0 && (
-          <button className="btn btn-glass" style={{ fontSize: 12 }} onClick={clearAll}>
-            <Icons.Trash /> Clear History
-          </button>
-        )}
+        {items.length > 0 && <button className="btn btn-glass" style={{ fontSize: 12 }} onClick={clearAll}><Icons.Trash /> Clear History</button>}
       </div>
-
-      {items.length === 0 && (
-        <div className="empty-state">
-          <div className="empty-icon"><Icons.Clock /></div>
-          <h2>No history yet</h2>
-          <p>Titles you watch will appear here automatically.</p>
-        </div>
-      )}
-
+      {items.length === 0 && <div className="empty-state"><div className="empty-icon"><Icons.Clock /></div><h2>No history yet</h2><p>Titles you watch will appear here automatically.</p></div>}
       <div className="media-grid">
         {items.map(item => (
           <div key={item.link + item.watchedAt} style={{ position: 'relative' }}>
-            <MediaCard
-              item={item}
-              onClick={() => navigate('info', { item, providerValue: item.provider })}
-            />
-            {item.watchedAt && (
-              <div className="history-badge">{timeAgo(item.watchedAt)}</div>
-            )}
+            <MediaCard item={item} onClick={() => navigate('info', { item, providerValue: item.provider })} />
+            {item.watchedAt && <div className="history-badge">{timeAgo(item.watchedAt)}</div>}
           </div>
         ))}
       </div>
