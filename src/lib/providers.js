@@ -4,40 +4,29 @@ const MANIFEST_URL = 'https://raw.githubusercontent.com/Zenda-Cross/vega-provide
 const MODULES_BASE = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
 const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
 
-// Multiple CORS proxies — tried in order until one works
 const PROXIES = [
   (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
   (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   (u) => `https://cors-anywhere.herokuapp.com/${u}`,
-  (u) => `https://thingproxy.freeboard.io/fetch/${u}`,
 ]
 
 const moduleCodeCache = new Map()
 
-// ── Core fetch with proxy fallback ────────────────────────────────────────
 async function fetchWithFallback(url, options = {}) {
   const { signal, headers = {}, method = 'GET', body } = options
-
-  const attempts = [
-    // 1. Direct (works for GitHub raw, some open APIs)
-    () => fetch(url, { method, headers, body, signal, mode: 'cors' }),
-    // 2-5. Each proxy
-    ...PROXIES.map(makeProxy => () =>
-      fetch(makeProxy(url), { method, headers, body, signal })
-    ),
-  ]
-
-  let lastErr
-  for (const attempt of attempts) {
+  try {
+    const res = await fetch(url, { method, headers, body, signal, mode: 'cors' })
+    if (res.ok) return res
+  } catch (_) {}
+  for (const makeProxy of PROXIES) {
     try {
-      const res = await attempt()
+      const res = await fetch(makeProxy(url), { method, headers, body, signal })
       if (res.ok) return res
-    } catch (e) {
-      lastErr = e
-      if (signal?.aborted) throw e
+    } catch (_) {
+      if (signal?.aborted) throw new Error('Aborted')
     }
   }
-  throw lastErr || new Error(`Failed to fetch: ${url}`)
+  throw new Error(`Failed to fetch: ${url}`)
 }
 
 async function fetchText(url, opts) {
@@ -50,7 +39,6 @@ async function fetchJSON(url, opts) {
   return res.json()
 }
 
-// ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(providerValue) {
   const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
   if (cached) return cached
@@ -63,7 +51,6 @@ export async function getBaseUrl(providerValue) {
   } catch { return '' }
 }
 
-// ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const cached = cacheStorage.getValid('manifest')
   if (cached) return cached
@@ -73,7 +60,6 @@ export async function fetchManifest() {
   return data
 }
 
-// ── Module loader ─────────────────────────────────────────────────────────
 async function getModuleCode(providerValue, moduleName) {
   const key = `${providerValue}/${moduleName}`
   if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
@@ -83,40 +69,45 @@ async function getModuleCode(providerValue, moduleName) {
   return code
 }
 
-// ── Module executor ───────────────────────────────────────────────────────
 function runModule(code) {
   const mod = { exports: {} }
+  const fakeProcess = {
+    env: { CORS_PRXY: '', NODE_ENV: 'production' }
+  }
   try {
-    // eslint-disable-next-line no-new-func
     const fn = new Function(
       'exports', 'module', 'console', 'Promise', 'Object',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+      'process', 'fetch',
       `"use strict";\n${code}\nreturn module.exports && Object.keys(module.exports).length ? module.exports : exports;`
     )
-    return fn(mod.exports, mod, console, Promise, Object, setTimeout, clearTimeout, setInterval, clearInterval) || mod.exports
+    return fn(
+      mod.exports, mod, console, Promise, Object,
+      setTimeout, clearTimeout, setInterval, clearInterval,
+      fakeProcess,
+      async (url, opts = {}) => fetchWithFallback(url, opts)
+    ) || mod.exports
   } catch (e) {
     console.warn('Module exec error:', e.message)
     return mod.exports
   }
 }
 
-// ── Axios-compatible shim injected into provider context ──────────────────
 function makeAxios() {
   const request = async (urlOrConfig, config = {}) => {
-    const isString = typeof urlOrConfig === 'string'
-    const url      = isString ? urlOrConfig : urlOrConfig.url
-    const method   = (isString ? config.method : urlOrConfig.method)?.toUpperCase() || 'GET'
-    const headers  = isString ? (config.headers || {}) : (urlOrConfig.headers || {})
-    const body     = isString ? config.data : urlOrConfig.data
-    const signal   = isString ? config.signal : urlOrConfig.signal
-    const params   = isString ? config.params : urlOrConfig.params
+    const isStr   = typeof urlOrConfig === 'string'
+    const url     = isStr ? urlOrConfig : urlOrConfig.url
+    const method  = ((isStr ? config.method : urlOrConfig.method) || 'GET').toUpperCase()
+    const headers = isStr ? (config.headers || {}) : (urlOrConfig.headers || {})
+    const body    = isStr ? config.data   : urlOrConfig.data
+    const signal  = isStr ? config.signal : urlOrConfig.signal
+    const params  = isStr ? config.params : urlOrConfig.params
 
     let finalUrl = url
     if (params) {
       const qs = new URLSearchParams(params).toString()
       finalUrl = `${url}${url.includes('?') ? '&' : '?'}${qs}`
     }
-
     const bodyStr = body && typeof body !== 'string' ? JSON.stringify(body) : body
     const res = await fetchWithFallback(finalUrl, { method, headers, body: bodyStr, signal })
     const text = await res.text()
@@ -127,28 +118,30 @@ function makeAxios() {
       status: res.status,
       statusText: res.statusText,
       headers: Object.fromEntries(res.headers.entries()),
+      request: { responseURL: res.url },
     }
   }
 
-  const axiosInstance = async (urlOrConfig, config) => request(urlOrConfig, config)
-  axiosInstance.get     = (url, cfg)       => request(url, { ...cfg, method: 'GET' })
-  axiosInstance.post    = (url, data, cfg) => request(url, { ...cfg, method: 'POST', data })
-  axiosInstance.put     = (url, data, cfg) => request(url, { ...cfg, method: 'PUT',  data })
-  axiosInstance.delete  = (url, cfg)       => request(url, { ...cfg, method: 'DELETE' })
-  axiosInstance.create  = (defaults = {}) => {
-    const inst = makeAxios()
-    inst._defaults = defaults
-    return inst
+  const inst = async (urlOrConfig, config) => request(urlOrConfig, config)
+  inst.get     = (url, cfg = {})       => request(url, { ...cfg, method: 'GET' })
+  inst.post    = (url, data, cfg = {}) => request(url, { ...cfg, method: 'POST', data })
+  inst.put     = (url, data, cfg = {}) => request(url, { ...cfg, method: 'PUT', data })
+  inst.delete  = (url, cfg = {})       => request(url, { ...cfg, method: 'DELETE' })
+  inst.head    = async (url, cfg = {}) => {
+    try {
+      const res = await fetchWithFallback(url, { ...cfg, method: 'HEAD' })
+      return { status: res.status, headers: Object.fromEntries(res.headers.entries()), request: { responseURL: res.url } }
+    } catch { return { status: 0, headers: {}, request: { responseURL: url } } }
   }
-  axiosInstance.defaults = { headers: { common: {} } }
-  axiosInstance.interceptors = {
+  inst.create  = (defaults = {}) => { const i = makeAxios(); i._defaults = defaults; return i }
+  inst.defaults = { headers: { common: {} } }
+  inst.interceptors = {
     request:  { use: () => {}, eject: () => {} },
     response: { use: () => {}, eject: () => {} },
   }
-  return axiosInstance
+  return inst
 }
 
-// ── Provider context ──────────────────────────────────────────────────────
 function makeContext() {
   return {
     axios: makeAxios(),
@@ -162,51 +155,57 @@ function makeContext() {
     },
     cheerio: {
       load: (html) => {
-        // Minimal cheerio shim using DOMParser (available in browsers)
         try {
           const parser = new DOMParser()
           const doc = parser.parseFromString(html, 'text/html')
-          const $ = (selector) => {
-            const els = [...doc.querySelectorAll(selector)]
-            const wrap = (nodeList) => {
-              const obj = {
-                _nodes: nodeList,
-                text:   () => nodeList.map(n => n.textContent).join(''),
-                html:   () => nodeList.map(n => n.innerHTML).join(''),
-                attr:   (a) => nodeList[0]?.getAttribute(a) || '',
-                val:    () => nodeList[0]?.value || '',
-                length: nodeList.length,
-                first:  () => wrap(nodeList.slice(0, 1)),
-                last:   () => wrap(nodeList.slice(-1)),
-                eq:     (i) => wrap(nodeList.slice(i, i + 1)),
-                find:   (s) => wrap(nodeList.flatMap(n => [...n.querySelectorAll(s)])),
-                filter: (s) => wrap(nodeList.filter(n => n.matches?.(s))),
-                each:   (fn) => { nodeList.forEach((n, i) => fn(i, n)); return obj },
-                map:    (fn) => nodeList.map((n, i) => fn(i, n)),
-                get:    (i) => i == null ? nodeList : nodeList[i],
-                toArray:() => nodeList,
-                parent: () => wrap(nodeList.map(n => n.parentElement).filter(Boolean)),
-                children:(s) => wrap(nodeList.flatMap(n => [...(s ? n.querySelectorAll(':scope > ' + s) : n.children)])),
-                next:   () => wrap(nodeList.map(n => n.nextElementSibling).filter(Boolean)),
-                prev:   () => wrap(nodeList.map(n => n.previousElementSibling).filter(Boolean)),
-                hasClass:(c) => nodeList[0]?.classList.contains(c) || false,
-                addClass:() => obj,
-                remove:  () => { nodeList.forEach(n => n.remove()); return obj },
-              }
-              return obj
+          function wrap(nodes) {
+            const arr = Array.isArray(nodes) ? nodes : Array.from(nodes || [])
+            const obj = {
+              _nodes: arr,
+              length:  arr.length,
+              text:    () => arr.map(n => n.textContent || '').join(''),
+              html:    () => arr.map(n => n.innerHTML || '').join(''),
+              attr:    (a) => arr[0]?.getAttribute?.(a) ?? '',
+              val:     () => arr[0]?.value ?? '',
+              first:   () => wrap(arr.slice(0, 1)),
+              last:    () => wrap(arr.slice(-1)),
+              eq:      (i) => wrap(arr.slice(i, i + 1)),
+              find:    (s) => wrap(arr.flatMap(n => Array.from(n.querySelectorAll?.(s) || []))),
+              filter:  (s) => wrap(arr.filter(n => n.matches?.(s))),
+              not:     (s) => wrap(arr.filter(n => !n.matches?.(s))),
+              each:    (fn) => { arr.forEach((n, i) => fn(i, n)); return obj },
+              map:     (fn) => arr.map((n, i) => fn(i, n)),
+              get:     (i) => i == null ? arr : arr[i],
+              toArray: () => arr,
+              parent:  () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
+              children:(s) => wrap(arr.flatMap(n => Array.from(s ? n.querySelectorAll(':scope > ' + s) : n.children || []))),
+              next:    () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
+              prev:    () => wrap(arr.map(n => n.previousElementSibling).filter(Boolean)),
+              hasClass:(c) => arr[0]?.classList?.contains(c) || false,
+              addClass:()  => obj,
+              remove:  ()  => { arr.forEach(n => n.remove()); return obj },
+              closest: (s) => wrap(arr.map(n => n.closest?.(s)).filter(Boolean)),
+              is:      (s) => arr.some(n => n.matches?.(s)),
             }
-            return wrap(els)
+            return obj
           }
-          $.html = () => doc.documentElement.outerHTML
-          $.text = () => doc.body.textContent
-          $.root = () => ({ find: (s) => $( s) })
-          return $
+          const $fn = (selector) => {
+            if (!selector) return wrap([])
+            try { return wrap(Array.from(doc.querySelectorAll(selector))) }
+            catch { return wrap([]) }
+          }
+          $fn.html = () => doc.documentElement.outerHTML
+          $fn.text = () => doc.body?.textContent || ''
+          $fn.root = () => wrap([doc.documentElement])
+          $fn.load = (h) => makeContext().cheerio.load(h)
+          return $fn
         } catch {
           const noop = () => noop
           noop.text = () => ''; noop.html = () => ''; noop.attr = () => ''
           noop.each = () => noop; noop.find = () => noop; noop.first = () => noop
-          noop.eq = () => noop; noop.map = () => ({ get: () => [] })
-          noop.length = 0; noop.get = () => []
+          noop.last = () => noop; noop.eq = () => noop; noop.filter = () => noop
+          noop.map = () => []; noop.get = () => []; noop.length = 0
+          noop.parent = () => noop; noop.load = () => noop
           return noop
         }
       },
@@ -220,7 +219,6 @@ function makeContext() {
   }
 }
 
-// ── Public API ────────────────────────────────────────────────────────────
 export async function getCatalog(providerValue) {
   const code = await getModuleCode(providerValue, 'catalog')
   const mod  = runModule(code)
