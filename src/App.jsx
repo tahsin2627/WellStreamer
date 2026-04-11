@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { AuthProvider, useAuth } from './lib/auth.js'
+import { AuthProvider, useAuth } from './lib/auth.jsx'
 import { useProviders } from './lib/useProviders.js'
 import { Navbar } from './components/Navbar.jsx'
 
