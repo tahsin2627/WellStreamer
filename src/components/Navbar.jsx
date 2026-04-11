@@ -1,5 +1,4 @@
 import { Icons } from './Icons.jsx'
-import { useAuth } from '../lib/auth.jsx'
 
 const NAV = [
   { id: 'home',      label: 'Home',      Icon: Icons.Home },
@@ -10,8 +9,6 @@ const NAV = [
 ]
 
 export function Navbar({ page, navigate }) {
-  const { user, logout } = useAuth()
-
   return (
     <nav className="navbar">
       <div className="navbar-logo" onClick={() => navigate('home')}>
@@ -30,12 +27,7 @@ export function Navbar({ page, navigate }) {
         ))}
       </div>
       <div className="navbar-user">
-        <div className="user-avatar" title={user?.username}>
-          {user?.username?.[0]?.toUpperCase()}
-        </div>
-        <button className="nav-item" onClick={logout} title="Sign out" style={{ padding: '8px 10px' }}>
-          <span className="nav-item-icon"><Icons.Logout /></span>
-        </button>
+        <div className="user-avatar">G</div>
       </div>
     </nav>
   )
