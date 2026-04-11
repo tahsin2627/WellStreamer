@@ -22,38 +22,16 @@ export default function WatchlistPage({ navigate }) {
         </div>
         {items.length > 0 && (
           <button className="btn btn-glass" style={{ fontSize: 12 }} onClick={() => {
-            if (confirm('Clear your entire watchlist?')) {
-              items.forEach(i => watchlistStorage.toggle(user.username, { link: i.link }))
-              setItems([])
-            }
-          }}>
-            <Icons.Trash /> Clear All
-          </button>
+            if (confirm('Clear your entire watchlist?')) { items.forEach(i => watchlistStorage.toggle(user.username, { link: i.link })); setItems([]) }
+          }}><Icons.Trash /> Clear All</button>
         )}
       </div>
-
-      {items.length === 0 && (
-        <div className="empty-state">
-          <div className="empty-icon"><Icons.Heart /></div>
-          <h2>Watchlist is empty</h2>
-          <p>Hit the + Watchlist button on any title to save it here.</p>
-        </div>
-      )}
-
+      {items.length === 0 && <div className="empty-state"><div className="empty-icon"><Icons.Heart /></div><h2>Watchlist is empty</h2><p>Hit the + Watchlist button on any title to save it here.</p></div>}
       <div className="media-grid">
         {items.map(item => (
           <div key={item.link} style={{ position: 'relative' }}>
-            <MediaCard
-              item={item}
-              onClick={() => navigate('info', { item, providerValue: item.provider })}
-            />
-            <button
-              className="remove-btn"
-              onClick={e => { e.stopPropagation(); remove(item.link) }}
-              title="Remove"
-            >
-              <Icons.X />
-            </button>
+            <MediaCard item={item} onClick={() => navigate('info', { item, providerValue: item.provider })} />
+            <button className="remove-btn" onClick={e => { e.stopPropagation(); remove(item.link) }} title="Remove"><Icons.X /></button>
           </div>
         ))}
       </div>
