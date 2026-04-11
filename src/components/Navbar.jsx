@@ -1,5 +1,5 @@
 import { Icons } from './Icons.jsx'
-import { useAuth } from '../lib/auth.js'
+import { useAuth } from '../lib/auth.jsx'
 
 const NAV = [
   { id: 'home',      label: 'Home',      Icon: Icons.Home },
