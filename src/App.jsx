@@ -3,18 +3,17 @@ import { AuthProvider, useAuth } from './lib/auth.js'
 import { useProviders } from './lib/useProviders.js'
 import { Navbar } from './components/Navbar.jsx'
 
-import LoginPage    from './pages/LoginPage.jsx'
-import HomePage     from './pages/HomePage.jsx'
-import SearchPage   from './pages/SearchPage.jsx'
-import InfoPage     from './pages/InfoPage.jsx'
-import PlayerPage   from './pages/PlayerPage.jsx'
+import LoginPage     from './pages/LoginPage.jsx'
+import HomePage      from './pages/HomePage.jsx'
+import SearchPage    from './pages/SearchPage.jsx'
+import InfoPage      from './pages/InfoPage.jsx'
+import PlayerPage    from './pages/PlayerPage.jsx'
 import ProvidersPage from './pages/ProvidersPage.jsx'
 import WatchlistPage from './pages/WatchlistPage.jsx'
-import HistoryPage  from './pages/HistoryPage.jsx'
+import HistoryPage   from './pages/HistoryPage.jsx'
 
 import './styles.css'
 
-// Pages that show the navbar
 const NAVBAR_PAGES = ['home', 'search', 'watchlist', 'history', 'providers']
 
 function Shell() {
@@ -35,7 +34,6 @@ function Shell() {
 
   return (
     <div className="app">
-      {/* Ambient background glow */}
       <div className="ambient-orb orb-1" />
       <div className="ambient-orb orb-2" />
 
