@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { historyStorage } from '../lib/storage.js'
-import { useAuth } from '../lib/auth.js'
+import { useAuth } from '../lib/auth.jsx'
 import { MediaCard } from '../components/MediaCard.jsx'
 import { Icons } from '../components/Icons.jsx'
 
