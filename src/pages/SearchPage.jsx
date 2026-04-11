@@ -4,7 +4,7 @@ import { MediaCard, SkeletonCard } from '../components/MediaCard.jsx'
 import { ProviderTabs } from '../components/ProviderTabs.jsx'
 import { Icons } from '../components/Icons.jsx'
 
-export default function SearchPage({ navigate, installed }) {
+export default function SearchPage({ navigate, installed, user }) {
   const [query, setQuery]       = useState('')
   const [active, setActive]     = useState(null)
   const [results, setResults]   = useState([])
@@ -50,23 +50,14 @@ export default function SearchPage({ navigate, installed }) {
         <div className="search-bar-wrap">
           <span className="search-icon"><Icons.Search /></span>
           <input ref={inputRef} className="search-input" placeholder="Movies, shows, anime…" value={query} onChange={e => setQuery(e.target.value)} />
-          {query && (
-            <button className="search-clear" onClick={() => { setQuery(''); setResults([]); setSearched(false) }}><Icons.X /></button>
-          )}
+          {query && <button className="search-clear" onClick={() => { setQuery(''); setResults([]); setSearched(false) }}><Icons.X /></button>}
         </div>
         <ProviderTabs providers={installed} active={active} onChange={p => { setActive(p); if (query.length >= 2) doSearch(query, p) }} />
       </div>
-
       {loading && <div className="search-grid">{[...Array(12)].map((_, i) => <SkeletonCard key={i} />)}</div>}
-      {!loading && searched && results.length === 0 && (
-        <div className="empty-state"><div className="empty-icon"><Icons.Search /></div><h2>No Results</h2><p>Try a different term or switch provider.</p></div>
-      )}
-      {!loading && !searched && (
-        <div className="empty-state"><div className="empty-icon"><Icons.Search /></div><h2>Find Anything</h2><p>Movies, TV series, anime — all in one place.</p></div>
-      )}
-      {!loading && results.length > 0 && (
-        <div className="search-grid">{results.map(item => <MediaCard key={item.link} item={item} onClick={goInfo} />)}</div>
-      )}
+      {!loading && searched && results.length === 0 && <div className="empty-state"><div className="empty-icon"><Icons.Search /></div><h2>No Results</h2><p>Try a different term or switch provider.</p></div>}
+      {!loading && !searched && <div className="empty-state"><div className="empty-icon"><Icons.Search /></div><h2>Find Anything</h2><p>Movies, TV series, anime — all in one place.</p></div>}
+      {!loading && results.length > 0 && <div className="search-grid">{results.map(item => <MediaCard key={item.link} item={item} onClick={goInfo} />)}</div>}
     </div>
   )
 }
