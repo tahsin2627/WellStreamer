@@ -1,4 +1,3 @@
-// ── Safe localStorage helpers ──────────────────────────────────────────────
 const ls = {
   get(key, fallback = null) {
     try {
@@ -14,22 +13,19 @@ const ls = {
   }
 }
 
-// ── Auth ───────────────────────────────────────────────────────────────────
 export const authStorage = {
-  getSession:  ()      => ls.get('ws_session'),
-  setSession:  (s)     => ls.set('ws_session', s),
-  clearSession:()      => ls.del('ws_session'),
-  getUsers:    ()      => ls.get('ws_users', {}),
-  setUsers:    (u)     => ls.set('ws_users', u),
+  getSession:   ()  => ls.get('ws_session'),
+  setSession:   (s) => ls.set('ws_session', s),
+  clearSession: ()  => ls.del('ws_session'),
+  getUsers:     ()  => ls.get('ws_users', {}),
+  setUsers:     (u) => ls.set('ws_users', u),
 }
 
-// ── Providers ──────────────────────────────────────────────────────────────
 export const providerStorage = {
   getInstalled:  ()    => ls.get('ws_providers', []),
   setInstalled:  (arr) => ls.set('ws_providers', arr),
 }
 
-// ── Watch History ──────────────────────────────────────────────────────────
 export const historyStorage = {
   get(username) {
     return ls.get(`ws_history_${username}`, [])
@@ -42,7 +38,6 @@ export const historyStorage = {
   clear(username) { ls.del(`ws_history_${username}`) }
 }
 
-// ── Watchlist ──────────────────────────────────────────────────────────────
 export const watchlistStorage = {
   get(username) {
     return ls.get(`ws_watchlist_${username}`, [])
@@ -55,11 +50,10 @@ export const watchlistStorage = {
     const exists = arr.some(x => x.link === item.link)
     arr = exists ? arr.filter(x => x.link !== item.link) : [{ ...item, addedAt: Date.now() }, ...arr]
     ls.set(`ws_watchlist_${username}`, arr)
-    return !exists   // returns true if ADDED
+    return !exists
   }
 }
 
-// ── Generic cache (base URLs etc.) ─────────────────────────────────────────
 export const cacheStorage = {
   get(key) { return ls.get(`ws_cache_${key}`) },
   set(key, value, ttlMs = 3_600_000) {
