@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getCatalog, getPosts } from '../lib/providers.js'
 import { historyStorage } from '../lib/storage.js'
-import { useAuth } from '../lib/auth.js'
+import { useAuth } from '../lib/auth.jsx'
 import { MediaCard, SkeletonCard } from '../components/MediaCard.jsx'
 import { ProviderTabs } from '../components/ProviderTabs.jsx'
 import { Icons } from '../components/Icons.jsx'
