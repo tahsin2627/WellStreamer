@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { getMeta, getEpisodes } from '../lib/providers.js'
 import { watchlistStorage, historyStorage } from '../lib/storage.js'
 import { generateAISummary } from '../lib/ai.js'
-import { useAuth } from '../lib/auth.js'
+import { useAuth } from '../lib/auth.jsx'
 import { Icons } from '../components/Icons.jsx'
 
 export default function InfoPage({ params, navigate }) {
