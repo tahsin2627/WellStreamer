@@ -1,8 +1,3 @@
-/**
- * Generates an AI-enhanced summary via the Anthropic API.
- * The API key is injected at build time via VITE_ANTHROPIC_KEY env var.
- * Falls back gracefully if the key is not set.
- */
 export async function generateAISummary({ title, synopsis, imdbId }) {
   const apiKey = import.meta.env.VITE_ANTHROPIC_KEY
   if (!apiKey) return null
@@ -17,18 +12,16 @@ export async function generateAISummary({ title, synopsis, imdbId }) {
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 500,
-      messages: [
-        {
-          role: 'user',
-          content: `You are a streaming platform's content curator. Write a punchy 2-sentence hook for this title that makes someone want to watch it immediately. Then give 4 genre/mood tags.
+      messages: [{
+        role: 'user',
+        content: `You are a streaming platform's content curator. Write a punchy 2-sentence hook for this title that makes someone want to watch it immediately. Then give 4 genre/mood tags.
 
 Title: ${title}
 Synopsis: ${synopsis || 'Not available'}
 IMDB: ${imdbId || 'N/A'}
 
 Reply with ONLY valid JSON, no markdown: {"hook":"...","tags":["...","...","...","..."]}`,
-        }
-      ]
+      }]
     })
   })
 
