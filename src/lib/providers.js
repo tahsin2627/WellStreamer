@@ -4,6 +4,7 @@ const MANIFEST_URL = 'https://raw.githubusercontent.com/Zenda-Cross/vega-provide
 const MODULES_BASE = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
 const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
 
+// CORS proxies tried in order
 const PROXIES = [
   (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
   (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
@@ -12,12 +13,15 @@ const PROXIES = [
 
 const moduleCodeCache = new Map()
 
+// ── Core fetch with CORS proxy fallback ───────────────────────────────────
 async function fetchWithFallback(url, options = {}) {
   const { signal, headers = {}, method = 'GET', body } = options
+  // 1. Direct
   try {
     const res = await fetch(url, { method, headers, body, signal, mode: 'cors' })
     if (res.ok) return res
   } catch (_) {}
+  // 2. Each proxy
   for (const makeProxy of PROXIES) {
     try {
       const res = await fetch(makeProxy(url), { method, headers, body, signal })
@@ -39,6 +43,7 @@ async function fetchJSON(url, opts) {
   return res.json()
 }
 
+// ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(providerValue) {
   const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
   if (cached) return cached
@@ -51,6 +56,7 @@ export async function getBaseUrl(providerValue) {
   } catch { return '' }
 }
 
+// ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const cached = cacheStorage.getValid('manifest')
   if (cached) return cached
@@ -60,6 +66,7 @@ export async function fetchManifest() {
   return data
 }
 
+// ── Module loader ─────────────────────────────────────────────────────────
 async function getModuleCode(providerValue, moduleName) {
   const key = `${providerValue}/${moduleName}`
   if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
@@ -69,12 +76,23 @@ async function getModuleCode(providerValue, moduleName) {
   return code
 }
 
+// ── Module executor ───────────────────────────────────────────────────────
+// KEY FIX: inject 'process' AND override 'fetch' inside module scope
+// This makes MoviesDrive's internal fetch() calls go through our CORS proxy
 function runModule(code) {
   const mod = { exports: {} }
+
   const fakeProcess = {
     env: { CORS_PRXY: '', NODE_ENV: 'production' }
   }
+
+  // This patched fetch is what MoviesDrive's posts.js calls directly
+  const patchedFetch = async (url, opts = {}) => {
+    return fetchWithFallback(url, opts)
+  }
+
   try {
+    // eslint-disable-next-line no-new-func
     const fn = new Function(
       'exports', 'module', 'console', 'Promise', 'Object',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
@@ -85,7 +103,7 @@ function runModule(code) {
       mod.exports, mod, console, Promise, Object,
       setTimeout, clearTimeout, setInterval, clearInterval,
       fakeProcess,
-      async (url, opts = {}) => fetchWithFallback(url, opts)
+      patchedFetch   // ← overrides fetch inside the module
     ) || mod.exports
   } catch (e) {
     console.warn('Module exec error:', e.message)
@@ -93,6 +111,7 @@ function runModule(code) {
   }
 }
 
+// ── Axios shim ────────────────────────────────────────────────────────────
 function makeAxios() {
   const request = async (urlOrConfig, config = {}) => {
     const isStr   = typeof urlOrConfig === 'string'
@@ -130,7 +149,11 @@ function makeAxios() {
   inst.head    = async (url, cfg = {}) => {
     try {
       const res = await fetchWithFallback(url, { ...cfg, method: 'HEAD' })
-      return { status: res.status, headers: Object.fromEntries(res.headers.entries()), request: { responseURL: res.url } }
+      return {
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        request: { responseURL: res.url },
+      }
     } catch { return { status: 0, headers: {}, request: { responseURL: url } } }
   }
   inst.create  = (defaults = {}) => { const i = makeAxios(); i._defaults = defaults; return i }
@@ -142,6 +165,7 @@ function makeAxios() {
   return inst
 }
 
+// ── Provider context ──────────────────────────────────────────────────────
 function makeContext() {
   return {
     axios: makeAxios(),
@@ -153,11 +177,16 @@ function makeContext() {
     commonHeaders: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
+    // Full DOM-based cheerio shim — needed for MoviesDrive HTML parsing
     cheerio: {
       load: (html) => {
         try {
           const parser = new DOMParser()
-          const doc = parser.parseFromString(html, 'text/html')
+          const doc = parser.parseFromString(
+            typeof html === 'string' ? html : String(html),
+            'text/html'
+          )
+
           function wrap(nodes) {
             const arr = Array.isArray(nodes) ? nodes : Array.from(nodes || [])
             const obj = {
@@ -170,42 +199,60 @@ function makeContext() {
               first:   () => wrap(arr.slice(0, 1)),
               last:    () => wrap(arr.slice(-1)),
               eq:      (i) => wrap(arr.slice(i, i + 1)),
-              find:    (s) => wrap(arr.flatMap(n => Array.from(n.querySelectorAll?.(s) || []))),
-              filter:  (s) => wrap(arr.filter(n => n.matches?.(s))),
-              not:     (s) => wrap(arr.filter(n => !n.matches?.(s))),
+              find:    (s) => { try { return wrap(arr.flatMap(n => Array.from(n.querySelectorAll?.(s) || []))) } catch { return wrap([]) } },
+              filter:  (fn) => {
+                if (typeof fn === 'string') return wrap(arr.filter(n => { try { return n.matches?.(fn) } catch { return false } }))
+                if (typeof fn === 'function') return wrap(arr.filter((n, i) => fn(i, n)))
+                return obj
+              },
+              not:     (s) => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
               each:    (fn) => { arr.forEach((n, i) => fn(i, n)); return obj },
               map:     (fn) => arr.map((n, i) => fn(i, n)),
               get:     (i) => i == null ? arr : arr[i],
               toArray: () => arr,
               parent:  () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
-              children:(s) => wrap(arr.flatMap(n => Array.from(s ? n.querySelectorAll(':scope > ' + s) : n.children || []))),
+              parents: (s) => {
+                const result = []
+                arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) result.push(p); p = p.parentElement } })
+                return wrap(result)
+              },
+              children:(s) => wrap(arr.flatMap(n => Array.from(s ? (n.querySelectorAll?.(':scope > ' + s) || []) : (n.children || [])))),
               next:    () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
               prev:    () => wrap(arr.map(n => n.previousElementSibling).filter(Boolean)),
               hasClass:(c) => arr[0]?.classList?.contains(c) || false,
               addClass:()  => obj,
+              removeClass:() => obj,
               remove:  ()  => { arr.forEach(n => n.remove()); return obj },
-              closest: (s) => wrap(arr.map(n => n.closest?.(s)).filter(Boolean)),
-              is:      (s) => arr.some(n => n.matches?.(s)),
+              closest: (s) => wrap(arr.map(n => { try { return n.closest?.(s) } catch { return null } }).filter(Boolean)),
+              is:      (s) => { try { return arr.some(n => n.matches?.(s)) } catch { return false } },
+              prop:    (p) => arr[0]?.[p],
+              data:    (k) => arr[0]?.dataset?.[k],
             }
             return obj
           }
+
           const $fn = (selector) => {
             if (!selector) return wrap([])
+            if (typeof selector !== 'string') return wrap([selector].flat().filter(Boolean))
             try { return wrap(Array.from(doc.querySelectorAll(selector))) }
             catch { return wrap([]) }
           }
-          $fn.html = () => doc.documentElement.outerHTML
-          $fn.text = () => doc.body?.textContent || ''
-          $fn.root = () => wrap([doc.documentElement])
-          $fn.load = (h) => makeContext().cheerio.load(h)
+
+          $fn.html  = () => doc.documentElement.outerHTML
+          $fn.text  = () => doc.body?.textContent || ''
+          $fn.root  = () => wrap([doc.documentElement])
+          $fn.load  = (h) => makeContext().cheerio.load(h)
+
           return $fn
-        } catch {
+        } catch (e) {
+          // Noop fallback
           const noop = () => noop
           noop.text = () => ''; noop.html = () => ''; noop.attr = () => ''
           noop.each = () => noop; noop.find = () => noop; noop.first = () => noop
           noop.last = () => noop; noop.eq = () => noop; noop.filter = () => noop
-          noop.map = () => []; noop.get = () => []; noop.length = 0
-          noop.parent = () => noop; noop.load = () => noop
+          noop.not = () => noop; noop.map = () => []; noop.get = () => []
+          noop.length = 0; noop.parent = () => noop; noop.load = () => noop
+          noop.closest = () => noop; noop.is = () => false
           return noop
         }
       },
@@ -219,6 +266,7 @@ function makeContext() {
   }
 }
 
+// ── Public API ────────────────────────────────────────────────────────────
 export async function getCatalog(providerValue) {
   const code = await getModuleCode(providerValue, 'catalog')
   const mod  = runModule(code)
