@@ -4,7 +4,7 @@ const MANIFEST_URL = 'https://raw.githubusercontent.com/Zenda-Cross/vega-provide
 const MODULES_BASE = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
 const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
 
-// MoviesDrive hardcoded URL — modflix.json has wrong/outdated URL
+// Hardcoded — modflix.json has outdated/wrong URL for MoviesDrive
 const DRIVE_BASE = 'https://new2.moviesdrives.my/'
 
 const PROXIES = [
@@ -15,12 +15,19 @@ const PROXIES = [
 
 const moduleCodeCache = new Map()
 
-async function fetchWithFallback(url, options = {}) {
+// ── Fast fetch: tries one proxy at a time with short timeout ──────────────
+async function fetchDirect(url, options = {}) {
   const { signal, headers = {}, method = 'GET', body } = options
   try {
     const res = await fetch(url, { method, headers, body, signal, mode: 'cors' })
     if (res.ok) return res
   } catch (_) {}
+  return null
+}
+
+// For MoviesDrive: skip direct (Cloudflare blocks), go straight to proxies
+async function fetchViaProxy(url, options = {}) {
+  const { signal, headers = {}, method = 'GET', body } = options
   for (const makeProxy of PROXIES) {
     try {
       const res = await fetch(makeProxy(url), { method, headers, body, signal })
@@ -29,12 +36,20 @@ async function fetchWithFallback(url, options = {}) {
       if (signal?.aborted) throw new Error('Aborted')
     }
   }
-  throw new Error(`Failed: ${url}`)
+  throw new Error(`Proxy fetch failed: ${url}`)
+}
+
+// General fetch: try direct first, then proxies
+async function fetchWithFallback(url, options = {}) {
+  const direct = await fetchDirect(url, options)
+  if (direct) return direct
+  return fetchViaProxy(url, options)
 }
 
 async function fetchText(url, opts) { return (await fetchWithFallback(url, opts)).text() }
 async function fetchJSON(url, opts) { return (await fetchWithFallback(url, opts)).json() }
 
+// ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(providerValue) {
   const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
   if (cached) return cached
@@ -47,6 +62,7 @@ export async function getBaseUrl(providerValue) {
   } catch { return '' }
 }
 
+// ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const cached = cacheStorage.getValid('manifest')
   if (cached) return cached
@@ -56,6 +72,7 @@ export async function fetchManifest() {
   return data
 }
 
+// ── Module loader ─────────────────────────────────────────────────────────
 async function getModuleCode(providerValue, moduleName) {
   const key = `${providerValue}/${moduleName}`
   if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
@@ -65,6 +82,7 @@ async function getModuleCode(providerValue, moduleName) {
   return code
 }
 
+// ── Module executor ───────────────────────────────────────────────────────
 function runModule(code) {
   const mod = { exports: {} }
   const fakeProcess = { env: { CORS_PRXY: '', NODE_ENV: 'production' } }
@@ -87,7 +105,10 @@ function runModule(code) {
   }
 }
 
-function makeAxios() {
+// ── Axios shim ────────────────────────────────────────────────────────────
+function makeAxios(forceProxy = false) {
+  const fetcher = forceProxy ? fetchViaProxy : fetchWithFallback
+
   const request = async (urlOrConfig, config = {}) => {
     const isStr   = typeof urlOrConfig === 'string'
     const url     = isStr ? urlOrConfig : urlOrConfig.url
@@ -102,12 +123,13 @@ function makeAxios() {
       finalUrl = `${url}${url.includes('?') ? '&' : '?'}${qs}`
     }
     const bodyStr = body && typeof body !== 'string' ? JSON.stringify(body) : body
-    const res = await fetchWithFallback(finalUrl, { method, headers, body: bodyStr, signal })
+    const res = await fetcher(finalUrl, { method, headers, body: bodyStr, signal })
     const text = await res.text()
     let data
     try { data = JSON.parse(text) } catch { data = text }
     return { data, status: res.status, statusText: res.statusText, headers: Object.fromEntries(res.headers.entries()), request: { responseURL: res.url } }
   }
+
   const inst = async (u, c) => request(u, c)
   inst.get    = (url, cfg = {})       => request(url, { ...cfg, method: 'GET' })
   inst.post   = (url, data, cfg = {}) => request(url, { ...cfg, method: 'POST', data })
@@ -115,16 +137,17 @@ function makeAxios() {
   inst.delete = (url, cfg = {})       => request(url, { ...cfg, method: 'DELETE' })
   inst.head   = async (url, cfg = {}) => {
     try {
-      const res = await fetchWithFallback(url, { ...cfg, method: 'HEAD' })
+      const res = await fetcher(url, { ...cfg, method: 'HEAD' })
       return { status: res.status, headers: Object.fromEntries(res.headers.entries()), request: { responseURL: res.url } }
     } catch { return { status: 0, headers: {}, request: { responseURL: url } } }
   }
-  inst.create = (d = {}) => { const i = makeAxios(); i._defaults = d; return i }
+  inst.create = (d = {}) => { const i = makeAxios(forceProxy); i._defaults = d; return i }
   inst.defaults = { headers: { common: {} } }
   inst.interceptors = { request: { use: () => {}, eject: () => {} }, response: { use: () => {}, eject: () => {} } }
   return inst
 }
 
+// ── Cheerio shim ──────────────────────────────────────────────────────────
 function makeCheerio() {
   return {
     load: (html) => {
@@ -165,14 +188,32 @@ function makeCheerio() {
             is:       (s) => { try { return arr.some(n => n.matches?.(s)) } catch { return false } },
             prop:     (p) => arr[0]?.[p],
             data:     (k) => arr[0]?.dataset?.[k],
+            // :contains() polyfill — DOMParser doesn't support it
+            // We handle it at the $fn level below
           }
           return obj
         }
+
         const $fn = (sel) => {
           if (!sel) return wrap([])
           if (typeof sel !== 'string') return wrap([sel].flat().filter(Boolean))
+
+          // Handle :contains() pseudo-selector — not supported by querySelectorAll
+          if (sel.includes(':contains(')) {
+            const containsMatch = sel.match(/^(.*?):contains\("([^"]+)"\)(.*)$/) ||
+                                  sel.match(/^(.*?):contains\('([^']+)'\)(.*)$/)
+            if (containsMatch) {
+              const [, base, text, rest] = containsMatch
+              const baseEls = base ? Array.from(doc.querySelectorAll(base)) : Array.from(doc.querySelectorAll('*'))
+              const filtered = baseEls.filter(el => el.textContent?.includes(text))
+              const resultSet = rest ? filtered.flatMap(el => Array.from(el.querySelectorAll(rest) || [])) : filtered
+              return wrap(resultSet)
+            }
+          }
+
           try { return wrap(Array.from(doc.querySelectorAll(sel))) } catch { return wrap([]) }
         }
+
         $fn.html = () => doc.documentElement.outerHTML
         $fn.text = () => doc.body?.textContent || ''
         $fn.root = () => wrap([doc.documentElement])
@@ -192,9 +233,10 @@ function makeCheerio() {
   }
 }
 
-function makeContext() {
+// ── Context: normal vs proxy-forced for MoviesDrive ───────────────────────
+function makeContext(forceProxy = false) {
   return {
-    axios: makeAxios(),
+    axios: makeAxios(forceProxy),
     getBaseUrl,
     Crypto: { randomUUID: () => crypto.randomUUID(), getRandomValues: (a) => crypto.getRandomValues(a) },
     commonHeaders: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
@@ -208,7 +250,7 @@ function makeContext() {
   }
 }
 
-// ── MOVIESDRIVE — hardcoded URL, RSS-first approach ───────────────────────
+// ── MOVIESDRIVE — RSS-first, proxy-first, hardcoded URL ───────────────────
 const DRIVE_CATALOG = [
   { title: 'Latest',       filter: '' },
   { title: 'Bollywood',    filter: 'category/bollywood/' },
@@ -220,80 +262,81 @@ const DRIVE_CATALOG = [
   { title: '4K',           filter: 'category/2160p-4k/' },
 ]
 
+function parseDriveHTML(html) {
+  const $ = makeCheerio().load(html)
+  const results = []
+  $('.poster-card').each((_, el) => {
+    const title = $(el).find('.poster-title').text().trim()
+    const link  = $(el).parent().attr('href') || ''
+    const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
+    if (title && link) results.push({ title: title.replace(/download/gi, '').trim(), link, image })
+  })
+  if (results.length === 0) {
+    $('article').each((_, el) => {
+      const title = $(el).find('h2,h3,.entry-title,.title').first().text().trim()
+      const link  = $(el).find('a').first().attr('href') || ''
+      const image = $(el).find('img').first().attr('src') || ''
+      if (title && link && link.startsWith('http')) {
+        results.push({ title: title.replace(/download/gi, '').trim(), link, image })
+      }
+    })
+  }
+  return results
+}
+
 async function driveGetPosts({ filter, page, signal }) {
-  // HARDCODED — modflix.json returns wrong/dead URL for drive
-  const baseUrl = DRIVE_BASE
+  const base = DRIVE_BASE
+
+  // 1. Try RSS first (fastest, no Cloudflare)
   try {
-    // RSS bypasses Cloudflare
-    const rssUrl = `${baseUrl}${filter}feed/`
-    console.log('[Drive] RSS:', rssUrl)
-    const text = await fetchText(rssUrl, { signal })
-    const xml  = new DOMParser().parseFromString(text, 'text/xml')
+    const rssUrl = `${base}${filter}feed/`
+    console.log('[Drive] Trying RSS:', rssUrl)
+    const text = await fetchViaProxy(rssUrl, { signal })
+    const txt  = await text.text()
+    const xml  = new DOMParser().parseFromString(txt, 'text/xml')
     const items = Array.from(xml.querySelectorAll('item'))
     if (items.length > 0) {
-      console.log('[Drive] RSS ok, items:', items.length)
+      console.log('[Drive] RSS ok:', items.length, 'items')
       return items.slice((page - 1) * 20, page * 20).map(item => {
         const title   = item.querySelector('title')?.textContent?.trim() || ''
         const link    = item.querySelector('link')?.textContent?.trim() || ''
-        const content = item.querySelector('encoded')?.textContent || item.querySelector('description')?.textContent || ''
-        const img     = content.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
-        return title && link ? { title: title.replace(/download/gi, '').trim(), link, image: img } : null
+        const encoded = item.querySelector('encoded')?.textContent || item.querySelector('description')?.textContent || ''
+        const image   = encoded.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
+        return title && link ? { title: title.replace(/download/gi, '').trim(), link, image } : null
       }).filter(Boolean)
     }
   } catch (e) { console.warn('[Drive] RSS failed:', e.message) }
 
-  // Fallback: HTML scrape
+  // 2. Fallback: HTML via proxy
   try {
-    const pageUrl = `${baseUrl}${filter}page/${page}/`
-    console.log('[Drive] HTML fallback:', pageUrl)
-    const text = await fetchText(pageUrl, { signal })
-    const $ = makeCheerio().load(text)
-    const results = []
-    $('.poster-card').each((_, el) => {
-      const title = $(el).find('.poster-title').text().trim()
-      const link  = $(el).parent().attr('href') || ''
-      const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      if (title && link) results.push({ title: title.replace(/download/gi, '').trim(), link, image })
-    })
-    if (results.length === 0) {
-      $('article, .post').each((_, el) => {
-        const title = $(el).find('h2,h3,.title,.entry-title').first().text().trim()
-        const link  = $(el).find('a').first().attr('href') || ''
-        const image = $(el).find('img').first().attr('src') || $(el).find('img').first().attr('data-src') || ''
-        if (title && link && link.startsWith('http')) {
-          results.push({ title: title.replace(/download/gi, '').trim(), link, image })
-        }
-      })
-    }
+    const url = `${base}${filter}page/${page}/`
+    console.log('[Drive] HTML fallback:', url)
+    const res  = await fetchViaProxy(url, { signal })
+    const html = await res.text()
+    const results = parseDriveHTML(html)
     console.log('[Drive] HTML results:', results.length)
     return results
-  } catch (e) { console.error('[Drive] HTML failed:', e.message); return [] }
+  } catch (e) {
+    console.error('[Drive] all failed:', e.message)
+    return []
+  }
 }
 
 async function driveSearch({ searchQuery, signal }) {
-  const baseUrl = DRIVE_BASE
   try {
-    const text = await fetchText(`${baseUrl}?s=${encodeURIComponent(searchQuery)}`, { signal })
-    const $ = makeCheerio().load(text)
-    const results = []
-    $('.poster-card').each((_, el) => {
-      const title = $(el).find('.poster-title').text().trim()
-      const link  = $(el).parent().attr('href') || ''
-      const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      if (title && link) results.push({ title: title.replace(/download/gi, '').trim(), link, image })
-    })
-    return results
+    const res  = await fetchViaProxy(`${DRIVE_BASE}?s=${encodeURIComponent(searchQuery)}`, { signal })
+    const html = await res.text()
+    return parseDriveHTML(html)
   } catch { return [] }
 }
 
-// ── Stream type normalizer ────────────────────────────────────────────────
+// ── Stream normalizer ─────────────────────────────────────────────────────
 function normalizeStreams(streams, providerValue) {
   return (streams || []).filter(s => s?.link).map(s => {
     const url = (s.link || '').toLowerCase()
     const t   = (s.type || '').toLowerCase()
     if (t === 'mkv' || t === 'mp4' || url.endsWith('.mkv') || url.endsWith('.mp4')) return s
     if (t === 'hls' || t === 'm3u8') return { ...s, type: 'hls' }
-    // autoEmbed (MultiStream) webstreamr always returns m3u8
     if (providerValue === 'autoEmbed') return { ...s, type: 'hls' }
     if (url.includes('.m3u8') || url.includes('/manifest')) return { ...s, type: 'hls' }
     return { ...s, type: 'hls' }
@@ -328,14 +371,18 @@ export async function getMeta({ providerValue, link }) {
   const code = await getModuleCode(providerValue, 'meta')
   const mod  = runModule(code)
   if (typeof mod.getMeta !== 'function') throw new Error('No getMeta export')
-  return mod.getMeta({ link, provider: providerValue, providerContext: makeContext() })
+  // MoviesDrive meta also needs proxy
+  const ctx = makeContext(providerValue === 'drive')
+  return mod.getMeta({ link, provider: providerValue, providerContext: ctx })
 }
 
 export async function getStream({ providerValue, link, type, signal }) {
   const code = await getModuleCode(providerValue, 'stream')
   const mod  = runModule(code)
   if (typeof mod.getStream !== 'function') throw new Error('No getStream export')
-  const raw = await mod.getStream({ link, type, signal, providerContext: makeContext() })
+  // MoviesDrive stream uses hubcloud extractor — needs proxy
+  const ctx = makeContext(providerValue === 'drive')
+  const raw = await mod.getStream({ link, type, signal, providerContext: ctx })
   return normalizeStreams(raw, providerValue)
 }
 
