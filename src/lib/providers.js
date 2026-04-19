@@ -12,6 +12,7 @@ const PROXIES = [
 
 const moduleCodeCache = new Map()
 
+// ── Fetch with CORS proxy fallback ────────────────────────────────────────
 async function fetchWithFallback(url, options = {}) {
   const { signal, headers = {}, method = 'GET', body } = options
   try {
@@ -32,6 +33,7 @@ async function fetchWithFallback(url, options = {}) {
 async function fetchText(url, opts) { return (await fetchWithFallback(url, opts)).text() }
 async function fetchJSON(url, opts) { return (await fetchWithFallback(url, opts)).json() }
 
+// ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(providerValue) {
   const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
   if (cached) return cached
@@ -44,6 +46,7 @@ export async function getBaseUrl(providerValue) {
   } catch { return '' }
 }
 
+// ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const cached = cacheStorage.getValid('manifest')
   if (cached) return cached
@@ -53,6 +56,7 @@ export async function fetchManifest() {
   return data
 }
 
+// ── Module loader ─────────────────────────────────────────────────────────
 async function getModuleCode(providerValue, moduleName) {
   const key = `${providerValue}/${moduleName}`
   if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
@@ -62,6 +66,7 @@ async function getModuleCode(providerValue, moduleName) {
   return code
 }
 
+// ── Module executor ───────────────────────────────────────────────────────
 function runModule(code) {
   const mod = { exports: {} }
   const fakeProcess = { env: { CORS_PRXY: '', NODE_ENV: 'production' } }
@@ -84,6 +89,7 @@ function runModule(code) {
   }
 }
 
+// ── Axios shim ────────────────────────────────────────────────────────────
 function makeAxios() {
   const request = async (urlOrConfig, config = {}) => {
     const isStr   = typeof urlOrConfig === 'string'
@@ -122,6 +128,7 @@ function makeAxios() {
   return inst
 }
 
+// ── Cheerio shim ──────────────────────────────────────────────────────────
 function makeCheerio() {
   return {
     load: (html) => {
@@ -132,36 +139,36 @@ function makeCheerio() {
           const arr = Array.isArray(nodes) ? nodes : Array.from(nodes || [])
           const obj = {
             _nodes: arr, length: arr.length,
-            text:    () => arr.map(n => n.textContent || '').join(''),
-            html:    () => arr.map(n => n.innerHTML || '').join(''),
-            attr:    (a) => arr[0]?.getAttribute?.(a) ?? '',
-            val:     () => arr[0]?.value ?? '',
-            first:   () => wrap(arr.slice(0, 1)),
-            last:    () => wrap(arr.slice(-1)),
-            eq:      (i) => wrap(arr.slice(i, i + 1)),
-            find:    (s) => { try { return wrap(arr.flatMap(n => Array.from(n.querySelectorAll?.(s) || []))) } catch { return wrap([]) } },
-            filter:  (fn) => {
+            text:     () => arr.map(n => n.textContent || '').join(''),
+            html:     () => arr.map(n => n.innerHTML || '').join(''),
+            attr:     (a) => arr[0]?.getAttribute?.(a) ?? '',
+            val:      () => arr[0]?.value ?? '',
+            first:    () => wrap(arr.slice(0, 1)),
+            last:     () => wrap(arr.slice(-1)),
+            eq:       (i) => wrap(arr.slice(i, i + 1)),
+            find:     (s) => { try { return wrap(arr.flatMap(n => Array.from(n.querySelectorAll?.(s) || []))) } catch { return wrap([]) } },
+            filter:   (fn) => {
               if (typeof fn === 'string') return wrap(arr.filter(n => { try { return n.matches?.(fn) } catch { return false } }))
               if (typeof fn === 'function') return wrap(arr.filter((n, i) => fn(i, n)))
               return obj
             },
-            not:     (s) => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
-            each:    (fn) => { arr.forEach((n, i) => fn(i, n)); return obj },
-            map:     (fn) => arr.map((n, i) => fn(i, n)),
-            get:     (i) => i == null ? arr : arr[i],
-            toArray: () => arr,
-            parent:  () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
-            parents: (s) => { const r = []; arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } }); return wrap(r) },
-            children:(s) => wrap(arr.flatMap(n => Array.from(s ? (n.querySelectorAll?.(':scope > ' + s) || []) : (n.children || [])))),
-            next:    () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
-            prev:    () => wrap(arr.map(n => n.previousElementSibling).filter(Boolean)),
-            hasClass:(c) => arr[0]?.classList?.contains(c) || false,
-            addClass:()  => obj, removeClass: () => obj,
-            remove:  ()  => { arr.forEach(n => n.remove()); return obj },
-            closest: (s) => wrap(arr.map(n => { try { return n.closest?.(s) } catch { return null } }).filter(Boolean)),
-            is:      (s) => { try { return arr.some(n => n.matches?.(s)) } catch { return false } },
-            prop:    (p) => arr[0]?.[p],
-            data:    (k) => arr[0]?.dataset?.[k],
+            not:      (s) => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
+            each:     (fn) => { arr.forEach((n, i) => fn(i, n)); return obj },
+            map:      (fn) => arr.map((n, i) => fn(i, n)),
+            get:      (i) => i == null ? arr : arr[i],
+            toArray:  () => arr,
+            parent:   () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
+            parents:  (s) => { const r = []; arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } }); return wrap(r) },
+            children: (s) => wrap(arr.flatMap(n => Array.from(s ? (n.querySelectorAll?.(':scope > ' + s) || []) : (n.children || [])))),
+            next:     () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
+            prev:     () => wrap(arr.map(n => n.previousElementSibling).filter(Boolean)),
+            hasClass: (c) => arr[0]?.classList?.contains(c) || false,
+            addClass: () => obj, removeClass: () => obj,
+            remove:   () => { arr.forEach(n => n.remove()); return obj },
+            closest:  (s) => wrap(arr.map(n => { try { return n.closest?.(s) } catch { return null } }).filter(Boolean)),
+            is:       (s) => { try { return arr.some(n => n.matches?.(s)) } catch { return false } },
+            prop:     (p) => arr[0]?.[p],
+            data:     (k) => arr[0]?.dataset?.[k],
           }
           return obj
         }
@@ -205,7 +212,7 @@ function makeContext() {
   }
 }
 
-// ── CUSTOM MOVIESDRIVE (bypasses Cloudflare using RSS) ────────────────────
+// ── CUSTOM MOVIESDRIVE (RSS feed bypasses Cloudflare) ─────────────────────
 const DRIVE_CATALOG = [
   { title: 'Latest', filter: '' },
   { title: 'Anime', filter: 'category/anime/' },
@@ -215,12 +222,9 @@ const DRIVE_CATALOG = [
 
 async function driveGetPosts({ filter, page, signal }) {
   const baseUrl = await getBaseUrl('drive')
-  if (!baseUrl) { console.warn('MoviesDrive: no base URL'); return [] }
-
-  // RSS feed avoids Cloudflare WAF
+  if (!baseUrl) return []
   try {
     const rssUrl = `${baseUrl}${filter}feed/`
-    console.log('MoviesDrive RSS:', rssUrl)
     const text = await fetchText(rssUrl, { signal })
     const xml = new DOMParser().parseFromString(text, 'text/xml')
     const items = Array.from(xml.querySelectorAll('item'))
@@ -233,30 +237,19 @@ async function driveGetPosts({ filter, page, signal }) {
         return title && link ? { title: title.replace(/download/i, '').trim(), link, image: img } : null
       }).filter(Boolean)
     }
-  } catch (e) { console.log('MoviesDrive RSS failed:', e.message) }
-
-  // Fallback: HTML scrape through proxy
+  } catch (e) { console.log('Drive RSS failed:', e.message) }
   try {
-    const pageUrl = `${baseUrl}${filter}${filter ? '' : ''}page/${page}/`
-    const text = await fetchText(pageUrl, { signal })
+    const text = await fetchText(`${baseUrl}${filter}page/${page}/`, { signal })
     const $ = makeCheerio().load(text)
     const results = []
-    $('.poster-card').each((i, el) => {
+    $('.poster-card').each((_, el) => {
       const title = $(el).find('.poster-title').text().trim()
       const link  = $(el).parent().attr('href') || ''
       const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
       if (title && link) results.push({ title: title.replace(/download/i, '').trim(), link, image })
     })
-    if (results.length === 0) {
-      $('article').each((i, el) => {
-        const title = $(el).find('h2,h3,.title').first().text().trim()
-        const link  = $(el).find('a').first().attr('href') || ''
-        const image = $(el).find('img').first().attr('src') || ''
-        if (title && link) results.push({ title: title.replace(/download/i, '').trim(), link, image })
-      })
-    }
     return results
-  } catch (e) { console.error('MoviesDrive HTML failed:', e.message); return [] }
+  } catch (e) { console.error('Drive HTML failed:', e.message); return [] }
 }
 
 async function driveSearch({ searchQuery, signal }) {
@@ -266,28 +259,46 @@ async function driveSearch({ searchQuery, signal }) {
     const text = await fetchText(`${baseUrl}?s=${encodeURIComponent(searchQuery)}`, { signal })
     const $ = makeCheerio().load(text)
     const results = []
-    $('.poster-card').each((i, el) => {
+    $('.poster-card').each((_, el) => {
       const title = $(el).find('.poster-title').text().trim()
       const link  = $(el).parent().attr('href') || ''
       const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
       if (title && link) results.push({ title: title.replace(/download/i, '').trim(), link, image })
     })
     return results
-  } catch (e) { console.error('MoviesDrive search failed:', e.message); return [] }
+  } catch { return [] }
 }
 
-// ── STREAM TYPE FIXER (fixes MultiStream type:"movie" → "hls") ───────────
-async function getStreamFixed({ providerValue, link, type, signal }) {
-  const code = await getModuleCode(providerValue, 'stream')
-  const mod  = runModule(code)
-  if (typeof mod.getStream !== 'function') throw new Error('No getStream export')
-  const raw = await mod.getStream({ link, type, signal, providerContext: makeContext() })
-  if (!Array.isArray(raw)) return []
-  return raw.filter(s => s?.link).map(s => {
-    const url = s.link || ''
+// ── STREAM NORMALIZER ─────────────────────────────────────────────────────
+// Fixes stream types so the player knows how to play them:
+// - webstreamr streams: type:"movie"/"series" but are ACTUALLY m3u8 → force "hls"
+// - drive/vega streams: type:"mkv" = direct file links → keep as "mkv"
+function normalizeStreams(streams, providerValue) {
+  return (streams || []).filter(s => s?.link).map(s => {
+    const url = (s.link || '').toLowerCase()
     const t   = (s.type || '').toLowerCase()
-    const isHLS = t === 'hls' || t === 'm3u8' || url.includes('.m3u8') || url.includes('/manifest')
-    return { ...s, type: isHLS ? 'hls' : t }
+
+    // Direct file types — keep as-is, player will use video.src
+    if (t === 'mkv' || t === 'mp4' || url.endsWith('.mkv') || url.endsWith('.mp4')) {
+      return { ...s, type: t || 'mkv' }
+    }
+
+    // Already correct HLS type
+    if (t === 'hls' || t === 'm3u8') return { ...s, type: 'hls' }
+
+    // MultiStream (autoEmbed) webstreamr returns type:"movie"/"series"
+    // but the actual URLs are m3u8 HLS streams
+    if (providerValue === 'autoEmbed') {
+      return { ...s, type: 'hls' }
+    }
+
+    // URL contains m3u8 hint
+    if (url.includes('.m3u8') || url.includes('/manifest')) {
+      return { ...s, type: 'hls' }
+    }
+
+    // Unknown — default to hls
+    return { ...s, type: 'hls' }
   })
 }
 
@@ -323,7 +334,11 @@ export async function getMeta({ providerValue, link }) {
 }
 
 export async function getStream({ providerValue, link, type, signal }) {
-  return getStreamFixed({ providerValue, link, type, signal })
+  const code = await getModuleCode(providerValue, 'stream')
+  const mod  = runModule(code)
+  if (typeof mod.getStream !== 'function') throw new Error('No getStream export')
+  const raw = await mod.getStream({ link, type, signal, providerContext: makeContext() })
+  return normalizeStreams(raw, providerValue)
 }
 
 export async function getEpisodes({ providerValue, url }) {
