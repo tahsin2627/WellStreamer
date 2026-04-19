@@ -4,6 +4,9 @@ const MANIFEST_URL = 'https://raw.githubusercontent.com/Zenda-Cross/vega-provide
 const MODULES_BASE = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
 const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
 
+// MoviesDrive hardcoded URL — modflix.json has wrong/outdated URL
+const DRIVE_BASE = 'https://new2.moviesdrives.my/'
+
 const PROXIES = [
   (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
   (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
@@ -12,7 +15,6 @@ const PROXIES = [
 
 const moduleCodeCache = new Map()
 
-// ── Fetch with CORS proxy fallback ────────────────────────────────────────
 async function fetchWithFallback(url, options = {}) {
   const { signal, headers = {}, method = 'GET', body } = options
   try {
@@ -33,7 +35,6 @@ async function fetchWithFallback(url, options = {}) {
 async function fetchText(url, opts) { return (await fetchWithFallback(url, opts)).text() }
 async function fetchJSON(url, opts) { return (await fetchWithFallback(url, opts)).json() }
 
-// ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(providerValue) {
   const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
   if (cached) return cached
@@ -46,7 +47,6 @@ export async function getBaseUrl(providerValue) {
   } catch { return '' }
 }
 
-// ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const cached = cacheStorage.getValid('manifest')
   if (cached) return cached
@@ -56,7 +56,6 @@ export async function fetchManifest() {
   return data
 }
 
-// ── Module loader ─────────────────────────────────────────────────────────
 async function getModuleCode(providerValue, moduleName) {
   const key = `${providerValue}/${moduleName}`
   if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
@@ -66,7 +65,6 @@ async function getModuleCode(providerValue, moduleName) {
   return code
 }
 
-// ── Module executor ───────────────────────────────────────────────────────
 function runModule(code) {
   const mod = { exports: {} }
   const fakeProcess = { env: { CORS_PRXY: '', NODE_ENV: 'production' } }
@@ -89,7 +87,6 @@ function runModule(code) {
   }
 }
 
-// ── Axios shim ────────────────────────────────────────────────────────────
 function makeAxios() {
   const request = async (urlOrConfig, config = {}) => {
     const isStr   = typeof urlOrConfig === 'string'
@@ -128,7 +125,6 @@ function makeAxios() {
   return inst
 }
 
-// ── Cheerio shim ──────────────────────────────────────────────────────────
 function makeCheerio() {
   return {
     load: (html) => {
@@ -212,49 +208,70 @@ function makeContext() {
   }
 }
 
-// ── CUSTOM MOVIESDRIVE (RSS feed bypasses Cloudflare) ─────────────────────
+// ── MOVIESDRIVE — hardcoded URL, RSS-first approach ───────────────────────
 const DRIVE_CATALOG = [
-  { title: 'Latest', filter: '' },
-  { title: 'Anime', filter: 'category/anime/' },
-  { title: 'Netflix', filter: 'category/netflix/' },
-  { title: '4K', filter: 'category/2160p-4k/' },
+  { title: 'Latest',       filter: '' },
+  { title: 'Bollywood',    filter: 'category/bollywood/' },
+  { title: 'Hollywood',    filter: 'category/hollywood/' },
+  { title: 'South Indian', filter: 'category/south-indian/' },
+  { title: 'Bengali',      filter: 'category/bengali/' },
+  { title: 'Anime',        filter: 'category/anime/' },
+  { title: 'Netflix',      filter: 'category/netflix/' },
+  { title: '4K',           filter: 'category/2160p-4k/' },
 ]
 
 async function driveGetPosts({ filter, page, signal }) {
-  const baseUrl = await getBaseUrl('drive')
-  if (!baseUrl) return []
+  // HARDCODED — modflix.json returns wrong/dead URL for drive
+  const baseUrl = DRIVE_BASE
   try {
+    // RSS bypasses Cloudflare
     const rssUrl = `${baseUrl}${filter}feed/`
+    console.log('[Drive] RSS:', rssUrl)
     const text = await fetchText(rssUrl, { signal })
-    const xml = new DOMParser().parseFromString(text, 'text/xml')
+    const xml  = new DOMParser().parseFromString(text, 'text/xml')
     const items = Array.from(xml.querySelectorAll('item'))
     if (items.length > 0) {
+      console.log('[Drive] RSS ok, items:', items.length)
       return items.slice((page - 1) * 20, page * 20).map(item => {
         const title   = item.querySelector('title')?.textContent?.trim() || ''
         const link    = item.querySelector('link')?.textContent?.trim() || ''
         const content = item.querySelector('encoded')?.textContent || item.querySelector('description')?.textContent || ''
         const img     = content.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
-        return title && link ? { title: title.replace(/download/i, '').trim(), link, image: img } : null
+        return title && link ? { title: title.replace(/download/gi, '').trim(), link, image: img } : null
       }).filter(Boolean)
     }
-  } catch (e) { console.log('Drive RSS failed:', e.message) }
+  } catch (e) { console.warn('[Drive] RSS failed:', e.message) }
+
+  // Fallback: HTML scrape
   try {
-    const text = await fetchText(`${baseUrl}${filter}page/${page}/`, { signal })
+    const pageUrl = `${baseUrl}${filter}page/${page}/`
+    console.log('[Drive] HTML fallback:', pageUrl)
+    const text = await fetchText(pageUrl, { signal })
     const $ = makeCheerio().load(text)
     const results = []
     $('.poster-card').each((_, el) => {
       const title = $(el).find('.poster-title').text().trim()
       const link  = $(el).parent().attr('href') || ''
       const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      if (title && link) results.push({ title: title.replace(/download/i, '').trim(), link, image })
+      if (title && link) results.push({ title: title.replace(/download/gi, '').trim(), link, image })
     })
+    if (results.length === 0) {
+      $('article, .post').each((_, el) => {
+        const title = $(el).find('h2,h3,.title,.entry-title').first().text().trim()
+        const link  = $(el).find('a').first().attr('href') || ''
+        const image = $(el).find('img').first().attr('src') || $(el).find('img').first().attr('data-src') || ''
+        if (title && link && link.startsWith('http')) {
+          results.push({ title: title.replace(/download/gi, '').trim(), link, image })
+        }
+      })
+    }
+    console.log('[Drive] HTML results:', results.length)
     return results
-  } catch (e) { console.error('Drive HTML failed:', e.message); return [] }
+  } catch (e) { console.error('[Drive] HTML failed:', e.message); return [] }
 }
 
 async function driveSearch({ searchQuery, signal }) {
-  const baseUrl = await getBaseUrl('drive')
-  if (!baseUrl) return []
+  const baseUrl = DRIVE_BASE
   try {
     const text = await fetchText(`${baseUrl}?s=${encodeURIComponent(searchQuery)}`, { signal })
     const $ = makeCheerio().load(text)
@@ -263,41 +280,22 @@ async function driveSearch({ searchQuery, signal }) {
       const title = $(el).find('.poster-title').text().trim()
       const link  = $(el).parent().attr('href') || ''
       const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      if (title && link) results.push({ title: title.replace(/download/i, '').trim(), link, image })
+      if (title && link) results.push({ title: title.replace(/download/gi, '').trim(), link, image })
     })
     return results
   } catch { return [] }
 }
 
-// ── STREAM NORMALIZER ─────────────────────────────────────────────────────
-// Fixes stream types so the player knows how to play them:
-// - webstreamr streams: type:"movie"/"series" but are ACTUALLY m3u8 → force "hls"
-// - drive/vega streams: type:"mkv" = direct file links → keep as "mkv"
+// ── Stream type normalizer ────────────────────────────────────────────────
 function normalizeStreams(streams, providerValue) {
   return (streams || []).filter(s => s?.link).map(s => {
     const url = (s.link || '').toLowerCase()
     const t   = (s.type || '').toLowerCase()
-
-    // Direct file types — keep as-is, player will use video.src
-    if (t === 'mkv' || t === 'mp4' || url.endsWith('.mkv') || url.endsWith('.mp4')) {
-      return { ...s, type: t || 'mkv' }
-    }
-
-    // Already correct HLS type
+    if (t === 'mkv' || t === 'mp4' || url.endsWith('.mkv') || url.endsWith('.mp4')) return s
     if (t === 'hls' || t === 'm3u8') return { ...s, type: 'hls' }
-
-    // MultiStream (autoEmbed) webstreamr returns type:"movie"/"series"
-    // but the actual URLs are m3u8 HLS streams
-    if (providerValue === 'autoEmbed') {
-      return { ...s, type: 'hls' }
-    }
-
-    // URL contains m3u8 hint
-    if (url.includes('.m3u8') || url.includes('/manifest')) {
-      return { ...s, type: 'hls' }
-    }
-
-    // Unknown — default to hls
+    // autoEmbed (MultiStream) webstreamr always returns m3u8
+    if (providerValue === 'autoEmbed') return { ...s, type: 'hls' }
+    if (url.includes('.m3u8') || url.includes('/manifest')) return { ...s, type: 'hls' }
     return { ...s, type: 'hls' }
   })
 }
