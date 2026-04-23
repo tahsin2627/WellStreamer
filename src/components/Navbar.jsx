@@ -1,11 +1,11 @@
 import { Icons } from './Icons.jsx'
 
 const NAV = [
-  { id: 'home',      label: 'Home',      Icon: Icons.Home },
-  { id: 'search',    label: 'Search',    Icon: Icons.Search },
-  { id: 'watchlist', label: 'Watchlist', Icon: Icons.Heart },
-  { id: 'history',   label: 'History',   Icon: Icons.Clock },
-  { id: 'providers', label: 'Providers', Icon: Icons.Puzzle },
+  { id:'home',      label:'Home',      Icon:Icons.Home },
+  { id:'search',    label:'Search',    Icon:Icons.Search },
+  { id:'watchlist', label:'Watchlist', Icon:Icons.Heart },
+  { id:'history',   label:'History',   Icon:Icons.Clock },
+  { id:'providers', label:'Providers', Icon:Icons.Puzzle },
 ]
 
 export function Navbar({ page, navigate }) {
@@ -16,11 +16,7 @@ export function Navbar({ page, navigate }) {
       </div>
       <div className="navbar-links">
         {NAV.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            className={`nav-item ${page === id ? 'active' : ''}`}
-            onClick={() => navigate(id)}
-          >
+          <button key={id} className={`nav-item ${page===id?'active':''}`} onClick={() => navigate(id)}>
             <span className="nav-item-icon"><Icon /></span>
             <span className="nav-item-label">{label}</span>
           </button>
