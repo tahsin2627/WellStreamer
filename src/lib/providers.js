@@ -1,401 +1,356 @@
 import { cacheStorage } from './storage.js'
 
-const MANIFEST_URL = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/manifest.json'
-const MODULES_BASE = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
+const MANIFEST_URL  = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/manifest.json'
+const MODULES_BASE  = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
 const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
+const DRIVE_BASE    = 'https://new2.moviesdrives.my/'   // hardcoded — modflix has wrong URL
 
-// Hardcoded — modflix.json has outdated/wrong URL for MoviesDrive
-const DRIVE_BASE = 'https://new2.moviesdrives.my/'
-
+// CORS proxies — tried in order
 const PROXIES = [
-  (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+  u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
 ]
 
-const moduleCodeCache = new Map()
+const moduleCache = new Map()
 
-// ── Fast fetch: tries one proxy at a time with short timeout ──────────────
-async function fetchDirect(url, options = {}) {
-  const { signal, headers = {}, method = 'GET', body } = options
+// ── fetch helpers ─────────────────────────────────────────────────────────
+async function tryFetch(url, opts = {}) {
   try {
-    const res = await fetch(url, { method, headers, body, signal, mode: 'cors' })
-    if (res.ok) return res
+    const r = await fetch(url, { ...opts, mode: 'cors' })
+    if (r.ok) return r
   } catch (_) {}
   return null
 }
 
-// For MoviesDrive: skip direct (Cloudflare blocks), go straight to proxies
-async function fetchViaProxy(url, options = {}) {
-  const { signal, headers = {}, method = 'GET', body } = options
-  for (const makeProxy of PROXIES) {
+async function proxyFetch(url, opts = {}) {
+  for (const p of PROXIES) {
     try {
-      const res = await fetch(makeProxy(url), { method, headers, body, signal })
-      if (res.ok) return res
+      const r = await fetch(p(url), opts)
+      if (r.ok) return r
     } catch (_) {
-      if (signal?.aborted) throw new Error('Aborted')
+      if (opts.signal?.aborted) throw new Error('aborted')
     }
   }
-  throw new Error(`Proxy fetch failed: ${url}`)
+  throw new Error(`All proxies failed for: ${url}`)
 }
 
-// General fetch: try direct first, then proxies
-async function fetchWithFallback(url, options = {}) {
-  const direct = await fetchDirect(url, options)
-  if (direct) return direct
-  return fetchViaProxy(url, options)
+// Direct first, then proxy fallback
+async function smartFetch(url, opts = {}) {
+  const d = await tryFetch(url, opts)
+  if (d) return d
+  return proxyFetch(url, opts)
 }
 
-async function fetchText(url, opts) { return (await fetchWithFallback(url, opts)).text() }
-async function fetchJSON(url, opts) { return (await fetchWithFallback(url, opts)).json() }
+const getText = async (url, o) => (await smartFetch(url, o)).text()
+const getJSON = async (url, o) => (await smartFetch(url, o)).json()
 
 // ── Base URL ──────────────────────────────────────────────────────────────
-export async function getBaseUrl(providerValue) {
-  const cached = cacheStorage.getValid(`baseUrl_${providerValue}`)
-  if (cached) return cached
+export async function getBaseUrl(key) {
+  const c = cacheStorage.getValid(`bu_${key}`)
+  if (c) return c
   try {
-    const data = await fetchJSON(BASE_URL_JSON)
-    for (const [k, v] of Object.entries(data)) {
-      if (v?.url) cacheStorage.set(`baseUrl_${k}`, v.url, 3_600_000)
-    }
-    return data[providerValue]?.url || ''
+    const d = await getJSON(BASE_URL_JSON)
+    Object.entries(d).forEach(([k, v]) => {
+      if (v?.url) cacheStorage.set(`bu_${k}`, v.url, 3_600_000)
+    })
+    return d[key]?.url || ''
   } catch { return '' }
 }
 
 // ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
-  const cached = cacheStorage.getValid('manifest')
-  if (cached) return cached
-  const data = await fetchJSON(MANIFEST_URL)
-  if (!Array.isArray(data)) throw new Error('Invalid manifest')
-  cacheStorage.set('manifest', data, 3_600_000)
-  return data
+  const c = cacheStorage.getValid('manifest')
+  if (c) return c
+  const d = await getJSON(MANIFEST_URL)
+  if (!Array.isArray(d)) throw new Error('bad manifest')
+  cacheStorage.set('manifest', d, 3_600_000)
+  return d
 }
 
 // ── Module loader ─────────────────────────────────────────────────────────
-async function getModuleCode(providerValue, moduleName) {
-  const key = `${providerValue}/${moduleName}`
-  if (moduleCodeCache.has(key)) return moduleCodeCache.get(key)
-  const url = `${MODULES_BASE}/${providerValue}/${moduleName}.js`
-  const code = await fetchText(url)
-  moduleCodeCache.set(key, code)
+async function loadModule(pv, name) {
+  const k = `${pv}/${name}`
+  if (moduleCache.has(k)) return moduleCache.get(k)
+  const code = await getText(`${MODULES_BASE}/${pv}/${name}.js`)
+  moduleCache.set(k, code)
   return code
 }
 
-// ── Module executor ───────────────────────────────────────────────────────
+// ── Module runner — injects process + patched fetch ───────────────────────
 function runModule(code) {
   const mod = { exports: {} }
-  const fakeProcess = { env: { CORS_PRXY: '', NODE_ENV: 'production' } }
-  const patchedFetch = (url, opts = {}) => fetchWithFallback(url, opts)
   try {
+    // eslint-disable-next-line no-new-func
     const fn = new Function(
-      'exports', 'module', 'console', 'Promise', 'Object',
-      'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
-      'process', 'fetch',
-      `"use strict";\n${code}\nreturn module.exports && Object.keys(module.exports).length ? module.exports : exports;`
+      'exports','module','console','Promise','Object',
+      'setTimeout','clearTimeout','setInterval','clearInterval',
+      'process','fetch',
+      `"use strict";\n${code}\nreturn module.exports&&Object.keys(module.exports).length?module.exports:exports;`
     )
     return fn(
       mod.exports, mod, console, Promise, Object,
       setTimeout, clearTimeout, setInterval, clearInterval,
-      fakeProcess, patchedFetch
+      { env: { CORS_PRXY: '', NODE_ENV: 'production' } },
+      (u, o = {}) => smartFetch(u, o)
     ) || mod.exports
   } catch (e) {
-    console.warn('Module exec error:', e.message)
+    console.warn('[runModule]', e.message)
     return mod.exports
   }
 }
 
-// ── Axios shim ────────────────────────────────────────────────────────────
-function makeAxios(forceProxy = false) {
-  const fetcher = forceProxy ? fetchViaProxy : fetchWithFallback
+// ── cheerio shim ──────────────────────────────────────────────────────────
+function cheerioLoad(html) {
+  try {
+    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html')
 
-  const request = async (urlOrConfig, config = {}) => {
-    const isStr   = typeof urlOrConfig === 'string'
-    const url     = isStr ? urlOrConfig : urlOrConfig.url
-    const method  = ((isStr ? config.method : urlOrConfig.method) || 'GET').toUpperCase()
-    const headers = isStr ? (config.headers || {}) : (urlOrConfig.headers || {})
-    const body    = isStr ? config.data   : urlOrConfig.data
-    const signal  = isStr ? config.signal : urlOrConfig.signal
-    const params  = isStr ? config.params : urlOrConfig.params
-    let finalUrl = url
-    if (params) {
-      const qs = new URLSearchParams(params).toString()
-      finalUrl = `${url}${url.includes('?') ? '&' : '?'}${qs}`
-    }
-    const bodyStr = body && typeof body !== 'string' ? JSON.stringify(body) : body
-    const res = await fetcher(finalUrl, { method, headers, body: bodyStr, signal })
-    const text = await res.text()
-    let data
-    try { data = JSON.parse(text) } catch { data = text }
-    return { data, status: res.status, statusText: res.statusText, headers: Object.fromEntries(res.headers.entries()), request: { responseURL: res.url } }
-  }
-
-  const inst = async (u, c) => request(u, c)
-  inst.get    = (url, cfg = {})       => request(url, { ...cfg, method: 'GET' })
-  inst.post   = (url, data, cfg = {}) => request(url, { ...cfg, method: 'POST', data })
-  inst.put    = (url, data, cfg = {}) => request(url, { ...cfg, method: 'PUT', data })
-  inst.delete = (url, cfg = {})       => request(url, { ...cfg, method: 'DELETE' })
-  inst.head   = async (url, cfg = {}) => {
-    try {
-      const res = await fetcher(url, { ...cfg, method: 'HEAD' })
-      return { status: res.status, headers: Object.fromEntries(res.headers.entries()), request: { responseURL: res.url } }
-    } catch { return { status: 0, headers: {}, request: { responseURL: url } } }
-  }
-  inst.create = (d = {}) => { const i = makeAxios(forceProxy); i._defaults = d; return i }
-  inst.defaults = { headers: { common: {} } }
-  inst.interceptors = { request: { use: () => {}, eject: () => {} }, response: { use: () => {}, eject: () => {} } }
-  return inst
-}
-
-// ── Cheerio shim ──────────────────────────────────────────────────────────
-function makeCheerio() {
-  return {
-    load: (html) => {
-      try {
-        const parser = new DOMParser()
-        const doc = parser.parseFromString(typeof html === 'string' ? html : String(html || ''), 'text/html')
-        function wrap(nodes) {
-          const arr = Array.isArray(nodes) ? nodes : Array.from(nodes || [])
-          const obj = {
-            _nodes: arr, length: arr.length,
-            text:     () => arr.map(n => n.textContent || '').join(''),
-            html:     () => arr.map(n => n.innerHTML || '').join(''),
-            attr:     (a) => arr[0]?.getAttribute?.(a) ?? '',
-            val:      () => arr[0]?.value ?? '',
-            first:    () => wrap(arr.slice(0, 1)),
-            last:     () => wrap(arr.slice(-1)),
-            eq:       (i) => wrap(arr.slice(i, i + 1)),
-            find:     (s) => { try { return wrap(arr.flatMap(n => Array.from(n.querySelectorAll?.(s) || []))) } catch { return wrap([]) } },
-            filter:   (fn) => {
-              if (typeof fn === 'string') return wrap(arr.filter(n => { try { return n.matches?.(fn) } catch { return false } }))
-              if (typeof fn === 'function') return wrap(arr.filter((n, i) => fn(i, n)))
-              return obj
-            },
-            not:      (s) => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
-            each:     (fn) => { arr.forEach((n, i) => fn(i, n)); return obj },
-            map:      (fn) => arr.map((n, i) => fn(i, n)),
-            get:      (i) => i == null ? arr : arr[i],
-            toArray:  () => arr,
-            parent:   () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
-            parents:  (s) => { const r = []; arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } }); return wrap(r) },
-            children: (s) => wrap(arr.flatMap(n => Array.from(s ? (n.querySelectorAll?.(':scope > ' + s) || []) : (n.children || [])))),
-            next:     () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
-            prev:     () => wrap(arr.map(n => n.previousElementSibling).filter(Boolean)),
-            hasClass: (c) => arr[0]?.classList?.contains(c) || false,
-            addClass: () => obj, removeClass: () => obj,
-            remove:   () => { arr.forEach(n => n.remove()); return obj },
-            closest:  (s) => wrap(arr.map(n => { try { return n.closest?.(s) } catch { return null } }).filter(Boolean)),
-            is:       (s) => { try { return arr.some(n => n.matches?.(s)) } catch { return false } },
-            prop:     (p) => arr[0]?.[p],
-            data:     (k) => arr[0]?.dataset?.[k],
-            // :contains() polyfill — DOMParser doesn't support it
-            // We handle it at the $fn level below
-          }
-          return obj
-        }
-
-        const $fn = (sel) => {
-          if (!sel) return wrap([])
-          if (typeof sel !== 'string') return wrap([sel].flat().filter(Boolean))
-
-          // Handle :contains() pseudo-selector — not supported by querySelectorAll
-          if (sel.includes(':contains(')) {
-            const containsMatch = sel.match(/^(.*?):contains\("([^"]+)"\)(.*)$/) ||
-                                  sel.match(/^(.*?):contains\('([^']+)'\)(.*)$/)
-            if (containsMatch) {
-              const [, base, text, rest] = containsMatch
-              const baseEls = base ? Array.from(doc.querySelectorAll(base)) : Array.from(doc.querySelectorAll('*'))
-              const filtered = baseEls.filter(el => el.textContent?.includes(text))
-              const resultSet = rest ? filtered.flatMap(el => Array.from(el.querySelectorAll(rest) || [])) : filtered
-              return wrap(resultSet)
-            }
-          }
-
-          try { return wrap(Array.from(doc.querySelectorAll(sel))) } catch { return wrap([]) }
-        }
-
-        $fn.html = () => doc.documentElement.outerHTML
-        $fn.text = () => doc.body?.textContent || ''
-        $fn.root = () => wrap([doc.documentElement])
-        $fn.load = (h) => makeCheerio().load(h)
-        return $fn
-      } catch {
-        const noop = () => noop
-        noop.text = () => ''; noop.html = () => ''; noop.attr = () => ''
-        noop.each = () => noop; noop.find = () => noop; noop.first = () => noop
-        noop.last = () => noop; noop.eq = () => noop; noop.filter = () => noop
-        noop.not = () => noop; noop.map = () => []; noop.get = () => []
-        noop.length = 0; noop.parent = () => noop; noop.load = () => noop
-        noop.closest = () => noop; noop.is = () => false; noop.children = () => noop
-        return noop
+    function wrap(arr) {
+      arr = Array.isArray(arr) ? arr : Array.from(arr || [])
+      const o = {
+        _nodes: arr, length: arr.length,
+        text:     () => arr.map(n => n.textContent || '').join(''),
+        html:     () => arr.map(n => n.innerHTML  || '').join(''),
+        attr:     a  => arr[0]?.getAttribute?.(a) ?? '',
+        val:      () => arr[0]?.value ?? '',
+        first:    () => wrap(arr.slice(0,1)),
+        last:     () => wrap(arr.slice(-1)),
+        eq:       i  => wrap(arr.slice(i, i+1)),
+        get:      i  => i == null ? arr : arr[i],
+        toArray:  () => arr,
+        each:     fn => { arr.forEach((n,i) => fn(i,n)); return o },
+        map:      fn => arr.map((n,i) => fn(i,n)),
+        find:     s  => { try { return wrap(arr.flatMap(n => [...(n.querySelectorAll?.(s)||[])])) } catch { return wrap([]) } },
+        filter:   fn => typeof fn==='function' ? wrap(arr.filter((n,i)=>fn(i,n))) : wrap(arr.filter(n=>{ try{return n.matches?.(fn)}catch{return false} })),
+        not:      s  => wrap(arr.filter(n=>{ try{return !n.matches?.(s)}catch{return true} })),
+        parent:   () => wrap(arr.map(n=>n.parentElement).filter(Boolean)),
+        parents:  s  => { const r=[]; arr.forEach(n=>{ let p=n.parentElement; while(p){if(!s||p.matches?.(s))r.push(p); p=p.parentElement} }); return wrap(r) },
+        children: s  => wrap(arr.flatMap(n=>[...(s?n.querySelectorAll?.(':scope > '+s)||[]:n.children||[])])),
+        next:     () => wrap(arr.map(n=>n.nextElementSibling).filter(Boolean)),
+        prev:     () => wrap(arr.map(n=>n.previousElementSibling).filter(Boolean)),
+        closest:  s  => wrap(arr.map(n=>{ try{return n.closest?.(s)}catch{return null} }).filter(Boolean)),
+        hasClass: c  => !!arr[0]?.classList?.contains(c),
+        is:       s  => arr.some(n=>{ try{return n.matches?.(s)}catch{return false} }),
+        addClass: ()  => o, removeClass: () => o,
+        remove:   ()  => { arr.forEach(n=>n.remove()); return o },
+        prop:     p  => arr[0]?.[p],
+        data:     k  => arr[0]?.dataset?.[k],
       }
+      return o
     }
+
+    function $(sel) {
+      if (!sel) return wrap([])
+      if (typeof sel !== 'string') return wrap([sel].flat().filter(Boolean))
+      // :contains() polyfill — browser doesn't support it in querySelectorAll
+      if (sel.includes(':contains(')) {
+        const m = sel.match(/^([\w\s.,#\[\]-]*):contains\(["']([^"']+)["']\)([\s\S]*)$/)
+        if (m) {
+          const [, base, text, after] = m
+          const baseEls = base.trim() ? [...doc.querySelectorAll(base.trim())] : [...doc.querySelectorAll('*')]
+          const matched = baseEls.filter(el => el.textContent?.includes(text))
+          return after.trim() ? wrap(matched.flatMap(el=>[...el.querySelectorAll(after.trim())])) : wrap(matched)
+        }
+      }
+      try { return wrap([...doc.querySelectorAll(sel)]) } catch { return wrap([]) }
+    }
+
+    $.html = () => doc.documentElement.outerHTML
+    $.text = () => doc.body?.textContent || ''
+    $.root = () => wrap([doc.documentElement])
+    $.load = h => cheerioLoad(h)
+    return $
+  } catch {
+    const n = () => n
+    n.text=()=>''; n.html=()=>''; n.attr=()=>''; n.each=()=>n
+    n.find=()=>n; n.first=()=>n; n.last=()=>n; n.eq=()=>n
+    n.filter=()=>n; n.not=()=>n; n.map=()=>[]; n.get=()=>[]
+    n.length=0; n.parent=()=>n; n.load=()=>n; n.is=()=>false
+    n.children=()=>n; n.closest=()=>n
+    return n
   }
 }
 
-// ── Context: normal vs proxy-forced for MoviesDrive ───────────────────────
-function makeContext(forceProxy = false) {
+const cheerio = { load: cheerioLoad }
+
+// ── axios shim ────────────────────────────────────────────────────────────
+function makeAxios(useProxy = false) {
+  const fetcher = useProxy ? proxyFetch : smartFetch
+
+  const req = async (urlOrCfg, cfg = {}) => {
+    const s = typeof urlOrCfg === 'string'
+    const url     = s ? urlOrCfg : urlOrCfg.url
+    const method  = ((s ? cfg.method : urlOrCfg.method) || 'GET').toUpperCase()
+    const headers = s ? (cfg.headers||{}) : (urlOrCfg.headers||{})
+    const body    = s ? cfg.data   : urlOrCfg.data
+    const signal  = s ? cfg.signal : urlOrCfg.signal
+    const params  = s ? cfg.params : urlOrCfg.params
+    let fu = url
+    if (params) fu += (url.includes('?')?'&':'?') + new URLSearchParams(params)
+    const bs = body && typeof body !== 'string' ? JSON.stringify(body) : body
+    const r = await fetcher(fu, { method, headers, body: bs, signal })
+    const txt = await r.text()
+    let data; try { data = JSON.parse(txt) } catch { data = txt }
+    return { data, status: r.status, statusText: r.statusText,
+             headers: Object.fromEntries(r.headers.entries()),
+             request: { responseURL: r.url } }
+  }
+
+  const ax = async (u, c) => req(u, c)
+  ax.get    = (u, c={})     => req(u, {...c, method:'GET'})
+  ax.post   = (u, d, c={}) => req(u, {...c, method:'POST', data:d})
+  ax.put    = (u, d, c={}) => req(u, {...c, method:'PUT',  data:d})
+  ax.delete = (u, c={})     => req(u, {...c, method:'DELETE'})
+  ax.head   = async (u, c={}) => {
+    try {
+      const r = await fetcher(u, {...c, method:'HEAD'})
+      return { status:r.status, headers:Object.fromEntries(r.headers.entries()), request:{responseURL:r.url} }
+    } catch { return { status:0, headers:{}, request:{responseURL:u} } }
+  }
+  ax.create = (d={}) => { const i=makeAxios(useProxy); i._defaults=d; return i }
+  ax.defaults = { headers: { common:{} } }
+  ax.interceptors = { request:{use:()=>{},eject:()=>{}}, response:{use:()=>{},eject:()=>{}} }
+  return ax
+}
+
+function makeCtx(useProxy = false) {
   return {
-    axios: makeAxios(forceProxy),
+    axios: makeAxios(useProxy),
     getBaseUrl,
-    Crypto: { randomUUID: () => crypto.randomUUID(), getRandomValues: (a) => crypto.getRandomValues(a) },
-    commonHeaders: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
-    cheerio: makeCheerio(),
+    cheerio,
+    commonHeaders: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    Crypto: { randomUUID: ()=>crypto.randomUUID(), getRandomValues: a=>crypto.getRandomValues(a) },
+    Aes: { encrypt:async()=>'', decrypt:async()=>'' },
     extractors: {
-      hubcloudExtracter: async () => [],
-      gofileExtracter: async () => ({ link: '', token: '' }),
-      superVideoExtractor: async () => '',
-      gdFlixExtracter: async () => [],
+      hubcloudExtracter:   async ()=>[],
+      gofileExtracter:     async ()=>({link:'',token:''}),
+      superVideoExtractor: async ()=>'',
+      gdFlixExtracter:     async ()=>[],
     },
   }
 }
 
-// ── MOVIESDRIVE — RSS-first, proxy-first, hardcoded URL ───────────────────
+// ── MoviesDrive — RSS-first, skip direct (Cloudflare blocks) ──────────────
 const DRIVE_CATALOG = [
-  { title: 'Latest',       filter: '' },
-  { title: 'Bollywood',    filter: 'category/bollywood/' },
-  { title: 'Hollywood',    filter: 'category/hollywood/' },
-  { title: 'South Indian', filter: 'category/south-indian/' },
-  { title: 'Bengali',      filter: 'category/bengali/' },
-  { title: 'Anime',        filter: 'category/anime/' },
-  { title: 'Netflix',      filter: 'category/netflix/' },
-  { title: '4K',           filter: 'category/2160p-4k/' },
+  { title:'Latest',       filter:'' },
+  { title:'Bollywood',    filter:'category/bollywood/' },
+  { title:'Hollywood',    filter:'category/hollywood/' },
+  { title:'South Indian', filter:'category/south-indian/' },
+  { title:'Bengali',      filter:'category/bengali/' },
+  { title:'Anime',        filter:'category/anime/' },
+  { title:'Netflix',      filter:'category/netflix/' },
+  { title:'4K',           filter:'category/2160p-4k/' },
 ]
 
-function parseDriveHTML(html) {
-  const $ = makeCheerio().load(html)
-  const results = []
+function parseDrivePage(html) {
+  const $ = cheerioLoad(html)
+  const out = []
   $('.poster-card').each((_, el) => {
     const title = $(el).find('.poster-title').text().trim()
     const link  = $(el).parent().attr('href') || ''
-    const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-    if (title && link) results.push({ title: title.replace(/download/gi, '').trim(), link, image })
+    const img   = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
+    if (title && link) out.push({ title: title.replace(/download/gi,'').trim(), link, image: img })
   })
-  if (results.length === 0) {
+  if (!out.length) {
     $('article').each((_, el) => {
-      const title = $(el).find('h2,h3,.entry-title,.title').first().text().trim()
+      const title = $(el).find('h2,h3,.entry-title').first().text().trim()
       const link  = $(el).find('a').first().attr('href') || ''
-      const image = $(el).find('img').first().attr('src') || ''
-      if (title && link && link.startsWith('http')) {
-        results.push({ title: title.replace(/download/gi, '').trim(), link, image })
-      }
+      const img   = $(el).find('img').first().attr('src') || ''
+      if (title && link?.startsWith('http')) out.push({ title: title.replace(/download/gi,'').trim(), link, image: img })
     })
   }
-  return results
+  return out
 }
 
 async function driveGetPosts({ filter, page, signal }) {
-  const base = DRIVE_BASE
-
-  // 1. Try RSS first (fastest, no Cloudflare)
+  // 1. RSS — fastest, no Cloudflare
   try {
-    const rssUrl = `${base}${filter}feed/`
-    console.log('[Drive] Trying RSS:', rssUrl)
-    const text = await fetchViaProxy(rssUrl, { signal })
-    const txt  = await text.text()
-    const xml  = new DOMParser().parseFromString(txt, 'text/xml')
-    const items = Array.from(xml.querySelectorAll('item'))
-    if (items.length > 0) {
-      console.log('[Drive] RSS ok:', items.length, 'items')
-      return items.slice((page - 1) * 20, page * 20).map(item => {
-        const title   = item.querySelector('title')?.textContent?.trim() || ''
-        const link    = item.querySelector('link')?.textContent?.trim() || ''
-        const encoded = item.querySelector('encoded')?.textContent || item.querySelector('description')?.textContent || ''
-        const image   = encoded.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
-        return title && link ? { title: title.replace(/download/gi, '').trim(), link, image } : null
+    const r   = await proxyFetch(`${DRIVE_BASE}${filter}feed/`, { signal })
+    const xml = new DOMParser().parseFromString(await r.text(), 'text/xml')
+    const items = [...xml.querySelectorAll('item')]
+    if (items.length) {
+      return items.slice((page-1)*20, page*20).map(it => {
+        const title = it.querySelector('title')?.textContent?.trim() || ''
+        const link  = it.querySelector('link')?.textContent?.trim() || ''
+        const body  = it.querySelector('encoded')?.textContent || it.querySelector('description')?.textContent || ''
+        const img   = body.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
+        return title && link ? { title: title.replace(/download/gi,'').trim(), link, image:img } : null
       }).filter(Boolean)
     }
-  } catch (e) { console.warn('[Drive] RSS failed:', e.message) }
+  } catch (e) { console.warn('[drive] RSS:', e.message) }
 
-  // 2. Fallback: HTML via proxy
+  // 2. HTML via proxy
   try {
-    const url = `${base}${filter}page/${page}/`
-    console.log('[Drive] HTML fallback:', url)
-    const res  = await fetchViaProxy(url, { signal })
-    const html = await res.text()
-    const results = parseDriveHTML(html)
-    console.log('[Drive] HTML results:', results.length)
-    return results
-  } catch (e) {
-    console.error('[Drive] all failed:', e.message)
-    return []
-  }
+    const r    = await proxyFetch(`${DRIVE_BASE}${filter}page/${page}/`, { signal })
+    const html = await r.text()
+    return parseDrivePage(html)
+  } catch (e) { console.error('[drive] HTML:', e.message); return [] }
 }
 
 async function driveSearch({ searchQuery, signal }) {
   try {
-    const res  = await fetchViaProxy(`${DRIVE_BASE}?s=${encodeURIComponent(searchQuery)}`, { signal })
-    const html = await res.text()
-    return parseDriveHTML(html)
+    const r = await proxyFetch(`${DRIVE_BASE}?s=${encodeURIComponent(searchQuery)}`, { signal })
+    return parseDrivePage(await r.text())
   } catch { return [] }
 }
 
-// ── Stream normalizer ─────────────────────────────────────────────────────
-function normalizeStreams(streams, providerValue) {
-  return (streams || []).filter(s => s?.link).map(s => {
-    const url = (s.link || '').toLowerCase()
-    const t   = (s.type || '').toLowerCase()
-    if (t === 'mkv' || t === 'mp4' || url.endsWith('.mkv') || url.endsWith('.mp4')) return s
-    if (t === 'hls' || t === 'm3u8') return { ...s, type: 'hls' }
-    if (providerValue === 'autoEmbed') return { ...s, type: 'hls' }
-    if (url.includes('.m3u8') || url.includes('/manifest')) return { ...s, type: 'hls' }
-    return { ...s, type: 'hls' }
+// ── stream type fixer ─────────────────────────────────────────────────────
+// - drive/vega/mod: type:"mkv" → keep as "mkv" (direct video.src)
+// - autoEmbed webstreamr: type:"movie"/"series" → set to "hls" (actual m3u8)
+function fixStreams(raw, pv) {
+  return (raw||[]).filter(s=>s?.link).map(s => {
+    const t   = (s.type||'').toLowerCase()
+    const url = (s.link||'').toLowerCase()
+    if (t==='mkv'||t==='mp4'||url.endsWith('.mkv')||url.endsWith('.mp4')) return s
+    if (t==='hls'||t==='m3u8'||url.includes('.m3u8')||url.includes('/manifest')) return {...s,type:'hls'}
+    if (pv==='autoEmbed') return {...s,type:'hls'}
+    return {...s,type:'hls'}
   })
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
-export async function getCatalog(providerValue) {
-  if (providerValue === 'drive') return { catalog: DRIVE_CATALOG, genres: [] }
-  const code = await getModuleCode(providerValue, 'catalog')
-  const mod  = runModule(code)
-  return { catalog: mod.catalog || [], genres: mod.genres || [] }
+export async function getCatalog(pv) {
+  if (pv==='drive') return { catalog:DRIVE_CATALOG, genres:[] }
+  const mod = runModule(await loadModule(pv,'catalog'))
+  return { catalog: mod.catalog||[], genres: mod.genres||[] }
 }
 
-export async function getPosts({ providerValue, filter, page, signal }) {
-  if (providerValue === 'drive') return driveGetPosts({ filter, page, signal })
-  const code = await getModuleCode(providerValue, 'posts')
-  const mod  = runModule(code)
-  if (typeof mod.getPosts !== 'function') throw new Error('No getPosts export')
-  return mod.getPosts({ filter, page, providerValue, signal, providerContext: makeContext() })
+export async function getPosts({ providerValue:pv, filter, page, signal }) {
+  if (pv==='drive') return driveGetPosts({ filter, page, signal })
+  const mod = runModule(await loadModule(pv,'posts'))
+  if (typeof mod.getPosts!=='function') throw new Error('no getPosts')
+  return mod.getPosts({ filter, page, providerValue:pv, signal, providerContext:makeCtx() })
 }
 
-export async function searchPosts({ providerValue, searchQuery, page, signal }) {
-  if (providerValue === 'drive') return driveSearch({ searchQuery, signal })
-  const code = await getModuleCode(providerValue, 'posts')
-  const mod  = runModule(code)
-  if (typeof mod.getSearchPosts !== 'function') throw new Error('No getSearchPosts export')
-  return mod.getSearchPosts({ searchQuery, page, providerValue, signal, providerContext: makeContext() })
+export async function searchPosts({ providerValue:pv, searchQuery, page, signal }) {
+  if (pv==='drive') return driveSearch({ searchQuery, signal })
+  const mod = runModule(await loadModule(pv,'posts'))
+  if (typeof mod.getSearchPosts!=='function') throw new Error('no getSearchPosts')
+  return mod.getSearchPosts({ searchQuery, page, providerValue:pv, signal, providerContext:makeCtx() })
 }
 
-export async function getMeta({ providerValue, link }) {
-  const code = await getModuleCode(providerValue, 'meta')
-  const mod  = runModule(code)
-  if (typeof mod.getMeta !== 'function') throw new Error('No getMeta export')
-  // MoviesDrive meta also needs proxy
-  const ctx = makeContext(providerValue === 'drive')
-  return mod.getMeta({ link, provider: providerValue, providerContext: ctx })
+export async function getMeta({ providerValue:pv, link }) {
+  const mod = runModule(await loadModule(pv,'meta'))
+  if (typeof mod.getMeta!=='function') throw new Error('no getMeta')
+  return mod.getMeta({ link, provider:pv, providerContext:makeCtx(pv==='drive') })
 }
 
-export async function getStream({ providerValue, link, type, signal }) {
-  const code = await getModuleCode(providerValue, 'stream')
-  const mod  = runModule(code)
-  if (typeof mod.getStream !== 'function') throw new Error('No getStream export')
-  // MoviesDrive stream uses hubcloud extractor — needs proxy
-  const ctx = makeContext(providerValue === 'drive')
-  const raw = await mod.getStream({ link, type, signal, providerContext: ctx })
-  return normalizeStreams(raw, providerValue)
+export async function getStream({ providerValue:pv, link, type, signal }) {
+  const mod = runModule(await loadModule(pv,'stream'))
+  if (typeof mod.getStream!=='function') throw new Error('no getStream')
+  const raw = await mod.getStream({ link, type, signal, providerContext:makeCtx(pv==='drive') })
+  return fixStreams(raw, pv)
 }
 
-export async function getEpisodes({ providerValue, url }) {
+export async function getEpisodes({ providerValue:pv, url }) {
   try {
-    const code = await getModuleCode(providerValue, 'episodes')
-    const mod  = runModule(code)
-    if (typeof mod.getEpisodes !== 'function') return []
-    return mod.getEpisodes({ url, providerContext: makeContext() })
+    const mod = runModule(await loadModule(pv,'episodes'))
+    if (typeof mod.getEpisodes!=='function') return []
+    return mod.getEpisodes({ url, providerContext:makeCtx() })
   } catch { return [] }
 }
 
-export async function installProvider(providerValue) {
-  if (providerValue === 'drive') return
-  await Promise.all(['catalog', 'posts', 'meta', 'stream'].map(m => getModuleCode(providerValue, m)))
+export async function installProvider(pv) {
+  if (pv==='drive') return
+  await Promise.all(['catalog','posts','meta','stream'].map(m=>loadModule(pv,m)))
 }
