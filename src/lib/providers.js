@@ -13,21 +13,22 @@ const PROXIES = [
 
 const moduleCache = new Map()
 
-// ── fetch helpers ─────────────────────────────────────────────────────────
-// proxyFetch: skips direct, goes straight to proxy (for Cloudflare sites)
+// ── KEY FIX: Race all proxies in PARALLEL — use whichever responds first ──
+// Previously proxies were tried sequentially: if corsproxy.io took 60s to
+// timeout, we'd wait 60s before trying allorigins. Now all 3 fire at once.
 async function proxyFetch(url, opts = {}) {
-  for (const p of PROXIES) {
-    try {
-      const r = await fetch(p(url), { ...opts, mode: 'cors' })
-      if (r.ok) return r
-    } catch (_) {
-      if (opts.signal?.aborted) throw new Error('aborted')
-    }
-  }
-  throw new Error(`proxyFetch failed: ${url}`)
+  const { signal, ...rest } = opts
+  return Promise.any(
+    PROXIES.map(p =>
+      fetch(p(url), { ...rest, signal }).then(r => {
+        if (!r.ok) throw new Error(`${r.status}`)
+        return r
+      })
+    )
+  ).catch(() => { throw new Error(`All proxies failed: ${url}`) })
 }
 
-// smartFetch: try direct first, then proxy
+// smartFetch: try direct first (no-op cost if CORS fails fast), then race proxies
 async function smartFetch(url, opts = {}) {
   try {
     const r = await fetch(url, { ...opts, mode: 'cors' })
@@ -41,6 +42,7 @@ const getJSON = async (url, o) => (await smartFetch(url, o)).json()
 
 // ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(key) {
+  if (key === 'drive') return DRIVE_BASE   // always use hardcoded URL for drive
   const c = cacheStorage.getValid(`bu_${key}`)
   if (c) return c
   try {
@@ -48,12 +50,8 @@ export async function getBaseUrl(key) {
     Object.entries(d).forEach(([k, v]) => {
       if (v?.url) cacheStorage.set(`bu_${k}`, v.url, 3_600_000)
     })
-    // Override drive with known working URL
-    cacheStorage.set('bu_drive', DRIVE_BASE, 3_600_000)
-    return key === 'drive' ? DRIVE_BASE : (d[key]?.url || '')
-  } catch {
-    return key === 'drive' ? DRIVE_BASE : ''
-  }
+    return d[key]?.url || ''
+  } catch { return '' }
 }
 
 // ── Manifest ──────────────────────────────────────────────────────────────
@@ -76,7 +74,8 @@ async function loadModule(pv, name) {
 }
 
 // ── Module runner ─────────────────────────────────────────────────────────
-// Injects process + patched fetch so provider's internal fetch() goes through proxy
+// Injects `process` and patched `fetch` so all provider fetch() calls
+// go through our proxy automatically — this is the key fix for drive posts
 function runModule(code) {
   const mod = { exports: {} }
   try {
@@ -91,8 +90,7 @@ function runModule(code) {
       mod.exports, mod, console, Promise, Object,
       setTimeout, clearTimeout, setInterval, clearInterval,
       { env: { CORS_PRXY: '', NODE_ENV: 'production' } },
-      // patched fetch — all provider fetch() calls go through smartFetch
-      (u, o = {}) => smartFetch(u, o)
+      (u, o = {}) => smartFetch(u, o)   // patched fetch injected here
     ) || mod.exports
   } catch (e) {
     console.warn('[runModule]', e.message)
@@ -128,9 +126,7 @@ function cheerioLoad(html) {
         not:      s  => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
         parent:   () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
         parents:  s  => {
-          const r = []
-          arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } })
-          return wrap(r)
+          const r = []; arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } }); return wrap(r)
         },
         children: s  => wrap(arr.flatMap(n => [...(s ? (n.querySelectorAll?.(':scope > ' + s) || []) : (n.children || []))])),
         next:     () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
@@ -149,14 +145,14 @@ function cheerioLoad(html) {
     function $(sel) {
       if (!sel) return wrap([])
       if (typeof sel !== 'string') return wrap([sel].flat().filter(Boolean))
-      // :contains() polyfill — not supported by querySelectorAll
+      // :contains() polyfill — querySelectorAll doesn't support it
       if (sel.includes(':contains(')) {
-        const m = sel.match(/^([\w\s,.*#[\]-]*):contains\(["']([^"']+)["']\)\s*([\s\S]*)$/)
+        const m = sel.match(/^([\w\s,.*#[\]"'=-]*?):contains\(["']([^"']+)["']\)\s*([\s\S]*)$/)
         if (m) {
           const [, base, text, after] = m
           const pool = base.trim() ? [...doc.querySelectorAll(base.trim())] : [...doc.querySelectorAll('*')]
           const matched = pool.filter(el => el.textContent?.includes(text))
-          return after.trim() ? wrap(matched.flatMap(el => [...el.querySelectorAll(after.trim())])) : wrap(matched)
+          return after.trim() ? wrap(matched.flatMap(el => [...(el.querySelectorAll(after.trim()) || [])])) : wrap(matched)
         }
       }
       try { return wrap([...doc.querySelectorAll(sel)]) } catch { return wrap([]) }
@@ -179,8 +175,8 @@ function cheerioLoad(html) {
 }
 
 // ── axios shim ────────────────────────────────────────────────────────────
-function makeAxios(useProxy = false) {
-  const doFetch = useProxy ? proxyFetch : smartFetch
+function makeAxios(forceProxy = false) {
+  const doFetch = forceProxy ? proxyFetch : smartFetch
   const req = async (cfg, extra = {}) => {
     const s = typeof cfg === 'string'
     const url    = s ? cfg : cfg.url
@@ -210,40 +206,48 @@ function makeAxios(useProxy = false) {
       return { status: r.status, headers: Object.fromEntries(r.headers.entries()), request: { responseURL: r.url } }
     } catch { return { status: 0, headers: {}, request: { responseURL: u } } }
   }
-  ax.create = (d = {}) => { const i = makeAxios(useProxy); i._defaults = d; return i }
+  ax.create = (d = {}) => { const i = makeAxios(forceProxy); i._defaults = d; return i }
   ax.defaults = { headers: { common: {} } }
   ax.interceptors = { request: { use: () => {}, eject: () => {} }, response: { use: () => {}, eject: () => {} } }
   return ax
 }
 
-// ── hubcloud extractor — browser-safe version ─────────────────────────────
-// Original uses fetch(url, {redirect:"manual"}) to read Location header.
-// Browsers return opaque response for redirect:manual — Location is always null.
-// Fix: use proxy to follow redirects server-side, then parse final URL.
-async function hubcloudExtractor(link, signal, axios, cheerio, headers) {
+// ── hubcloud extractor — browser-safe ─────────────────────────────────────
+// Original uses fetch(link, {redirect:"manual"}) to read Location header.
+// Browsers CANNOT read Location header from opaque redirect responses.
+// Fix: use proxyFetch which follows redirects server-side on the proxy.
+const CF_COOKIE = 'ext_name=ojplmecpdpgccookcobabopnaifgidhf; xla=s4t'
+
+async function hubcloudExtractor(link, signal, ax, _cheerio, headers) {
+  const hdr = { ...headers, Cookie: CF_COOKIE }
+  const streamLinks = []
   try {
-    const streamLinks = []
     const baseUrl = link.split('/').slice(0, 3).join('/')
 
-    // Step 1: get the vcloud page
-    const vRes = await axios(link, { headers, signal })
-    const vHtml = vRes.data
-    const $v = cheerioLoad(vHtml)
+    // Step 1: get the vcloud redirect page
+    const vRes  = await ax(link, { headers: hdr, signal })
+    const vHtml = typeof vRes.data === 'string' ? vRes.data : ''
+    const $v    = cheerioLoad(vHtml)
 
     const urlMatch = vHtml.match(/var\s+url\s*=\s*'([^']+)'/)
-    let vcloudLink = urlMatch?.[1]
-      ? (atob(urlMatch[1].split('r=')[1] || '') || urlMatch[1])
-      : ($v('.fa-file-download.fa-lg').parent().attr('href') || link)
-
+    let vcloudLink
+    if (urlMatch?.[1]) {
+      try { vcloudLink = atob(urlMatch[1].split('r=')[1] || '') } catch { vcloudLink = urlMatch[1] }
+      if (!vcloudLink) vcloudLink = urlMatch[1]
+    }
+    if (!vcloudLink) vcloudLink = $v('.fa-file-download.fa-lg').parent().attr('href') || link
     if (vcloudLink?.startsWith('/')) vcloudLink = `${baseUrl}${vcloudLink}`
 
-    // Step 2: get the vcloud download page via proxy (proxy follows redirects)
-    const vcRes = await axios(vcloudLink, { headers, signal })
-    const vcHtml = typeof vcRes.data === 'string' ? vcRes.data : ''
-    const $vc = cheerioLoad(vcHtml)
+    console.log('[hubcloud] vcloudLink:', vcloudLink)
 
-    const btnEls = $vc('.btn-success.btn-lg.h6, .btn-danger, .btn-secondary')
-    for (const el of btnEls._nodes || []) {
+    // Step 2: get the download buttons page
+    // Use proxyFetch with redirect:follow — proxy follows server-side
+    const vcRes  = await proxyFetch(vcloudLink, { signal })
+    const vcHtml = await vcRes.text()
+    const $      = cheerioLoad(vcHtml)
+
+    const btns = $('.btn-success.btn-lg.h6, .btn-danger, .btn-secondary')
+    for (const el of (btns._nodes || [])) {
       let href = el.getAttribute('href') || ''
       if (!href) continue
 
@@ -263,21 +267,21 @@ async function hubcloudExtractor(link, signal, axios, cheerio, headers) {
       } else if (href.includes('hubcdn') && !href.includes('/?id=')) {
         streamLinks.push({ server: 'HubCdn', link: href, type: 'mkv' })
       } else if (href.includes('hubcloud') || href.includes('/?id=')) {
-        // Resolve hubcloud redirect via proxy instead of redirect:manual
+        // Resolve redirect via proxy (proxy follows 301/302 server-side)
         try {
-          const redirectRes = await proxyFetch(href, { signal })
-          const finalUrl = redirectRes.url || href
+          const rr = await proxyFetch(href, { signal })
+          const finalUrl = rr.url || href
           const resolved = finalUrl.includes('?link=') ? finalUrl.split('?link=')[1] : finalUrl
-          streamLinks.push({ server: 'HubCloud', link: resolved, type: 'mkv' })
+          streamLinks.push({ server: 'HubCloud', link: resolved || href, type: 'mkv' })
         } catch {
           streamLinks.push({ server: 'HubCloud', link: href, type: 'mkv' })
         }
       } else if (href.includes('.mkv') || href.includes('?token=')) {
-        const srvName = href.match(/^(?:https?:\/\/)?(?:www\.)?([^/]+)/i)?.[1]?.replace(/\./g, ' ') || 'Unknown'
-        streamLinks.push({ server: srvName, link: href, type: 'mkv' })
+        const srv = href.match(/^(?:https?:\/\/)?(?:www\.)?([^/]+)/i)?.[1]?.replace(/\./g, ' ') || 'Unknown'
+        streamLinks.push({ server: srv, link: href, type: 'mkv' })
       }
     }
-
+    console.log('[hubcloud] found streams:', streamLinks.length)
     return streamLinks
   } catch (e) {
     console.error('[hubcloud]', e.message)
@@ -286,23 +290,22 @@ async function hubcloudExtractor(link, signal, axios, cheerio, headers) {
 }
 
 // ── provider context ──────────────────────────────────────────────────────
-function makeCtx(useProxy = false) {
+function makeCtx(forceProxy = false) {
   return {
-    axios: makeAxios(useProxy),
+    axios: makeAxios(forceProxy),
     getBaseUrl,
     cheerio: { load: cheerioLoad },
     commonHeaders: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Cookie': 'xla=s4t',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+      'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
     },
     Crypto: { randomUUID: () => crypto.randomUUID(), getRandomValues: a => crypto.getRandomValues(a) },
     Aes: { encrypt: async () => '', decrypt: async () => '' },
     extractors: {
-      // Inject our browser-safe hubcloud extractor
-      hubcloudExtracter: (link, signal, axios, cheerio, headers) =>
-        hubcloudExtractor(link, signal, axios, cheerio, headers),
-      hubcloudExtractor: (link, signal, axios, cheerio, headers) =>
-        hubcloudExtractor(link, signal, axios, cheerio, headers),
+      hubcloudExtracter: hubcloudExtractor,
+      hubcloudExtractor: hubcloudExtractor,
       gofileExtracter:     async () => ({ link: '', token: '' }),
       superVideoExtractor: async () => '',
       gdFlixExtracter:     async () => [],
@@ -315,17 +318,14 @@ function fixStreams(raw, pv) {
   return (raw || []).filter(s => s?.link).map(s => {
     const t = (s.type || '').toLowerCase()
     const u = (s.link || '').toLowerCase()
-    // mkv/mp4 = direct file, video.src can play it
     if (t === 'mkv' || t === 'mp4' || u.endsWith('.mkv') || u.endsWith('.mp4')) return s
-    // hls
     if (t === 'hls' || t === 'm3u8' || u.includes('.m3u8') || u.includes('/manifest')) return { ...s, type: 'hls' }
-    // autoEmbed (MultiStream) webstreamr returns m3u8 with type:"movie"
     if (pv === 'autoEmbed') return { ...s, type: 'hls' }
     return { ...s, type: 'hls' }
   })
 }
 
-// ── MoviesDrive — direct implementation (no runModule needed) ─────────────
+// ── MoviesDrive catalog ───────────────────────────────────────────────────
 const DRIVE_CATALOG = [
   { title: 'Latest',       filter: '' },
   { title: 'Bollywood',    filter: 'category/bollywood/' },
@@ -337,100 +337,6 @@ const DRIVE_CATALOG = [
   { title: '4K',           filter: 'category/2160p-4k/' },
 ]
 
-function parseDrivePosts(html) {
-  const $ = cheerioLoad(html)
-  const out = []
-  $('.poster-card').each((_, el) => {
-    const w    = $(el)
-    const title = w.find('.poster-title').text().trim()
-    const link  = w.parent().attr('href') || ''
-    const image = w.find('.poster-image img').attr('src') || w.find('img').attr('src') || ''
-    if (title && link) out.push({ title: title.replace(/download/gi, '').trim(), link, image })
-  })
-  if (!out.length) {
-    $('article').each((_, el) => {
-      const w     = $(el)
-      const title = w.find('h2, h3, .entry-title').first().text().trim()
-      const link  = w.find('a').first().attr('href') || ''
-      const image = w.find('img').first().attr('src') || ''
-      if (title && link?.startsWith('http')) out.push({ title: title.replace(/download/gi, '').trim(), link, image })
-    })
-  }
-  return out
-}
-
-async function driveGetPosts({ filter, page, signal }) {
-  // RSS feed — fastest, bypasses Cloudflare WAF
-  try {
-    const rssUrl = `${DRIVE_BASE}${filter}feed/`
-    console.log('[drive] RSS:', rssUrl)
-    const r   = await proxyFetch(rssUrl, { signal })
-    const xml = new DOMParser().parseFromString(await r.text(), 'text/xml')
-    const items = [...xml.querySelectorAll('item')]
-    if (items.length) {
-      console.log('[drive] RSS ok, items:', items.length)
-      return items.slice((page - 1) * 20, page * 20).map(it => {
-        const title = it.querySelector('title')?.textContent?.trim() || ''
-        const link  = it.querySelector('link')?.textContent?.trim()  || ''
-        const body  = it.querySelector('encoded')?.textContent || it.querySelector('description')?.textContent || ''
-        const image = body.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || ''
-        return title && link ? { title: title.replace(/download/gi, '').trim(), link, image } : null
-      }).filter(Boolean)
-    }
-  } catch (e) { console.warn('[drive] RSS failed:', e.message) }
-
-  // Fallback: HTML scrape via proxy
-  try {
-    const url = `${DRIVE_BASE}${filter}page/${page}/`
-    console.log('[drive] HTML:', url)
-    const r    = await proxyFetch(url, { signal })
-    const html = await r.text()
-    const out  = parseDrivePosts(html)
-    console.log('[drive] HTML results:', out.length)
-    return out
-  } catch (e) {
-    console.error('[drive] all failed:', e.message)
-    return []
-  }
-}
-
-async function driveSearch({ searchQuery, signal }) {
-  try {
-    const r    = await proxyFetch(`${DRIVE_BASE}?s=${encodeURIComponent(searchQuery)}`, { signal })
-    const html = await r.text()
-    return parseDrivePosts(html)
-  } catch { return [] }
-}
-
-async function driveGetStream({ link: url, type, signal }) {
-  const ax  = makeAxios(true) // force proxy for all requests
-  const hdr = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Cookie': 'xla=s4t',
-  }
-
-  try {
-    // For movies: scrape the HubCloud link from the post page
-    let targetUrl = url
-    if (type === 'movie') {
-      const res  = await ax.get(url, { headers: hdr, signal })
-      const html = typeof res.data === 'string' ? res.data : ''
-      const $    = cheerioLoad(html)
-      // :contains polyfill already in cheerioLoad
-      const hubLink = $('a:contains("HubCloud")').attr('href')
-        || $('a[href*="hubcloud"]').attr('href')
-        || $('a[href*="hub."]').attr('href')
-      console.log('[drive stream] hubLink:', hubLink)
-      if (hubLink) targetUrl = hubLink
-    }
-
-    return hubcloudExtractor(targetUrl, signal, ax, { load: cheerioLoad }, hdr)
-  } catch (e) {
-    console.error('[drive stream]', e.message)
-    return []
-  }
-}
-
 // ── Public API ────────────────────────────────────────────────────────────
 export async function getCatalog(pv) {
   if (pv === 'drive') return { catalog: DRIVE_CATALOG, genres: [] }
@@ -439,17 +345,17 @@ export async function getCatalog(pv) {
 }
 
 export async function getPosts({ providerValue: pv, filter, page, signal }) {
-  if (pv === 'drive') return driveGetPosts({ filter, page, signal })
+  // For drive: run the actual module with proxy-patched fetch injected
+  // The module's fetch() calls go through smartFetch (our injected version)
   const mod = runModule(await loadModule(pv, 'posts'))
   if (typeof mod.getPosts !== 'function') throw new Error('no getPosts')
-  return mod.getPosts({ filter, page, providerValue: pv, signal, providerContext: makeCtx() })
+  return mod.getPosts({ filter, page, providerValue: pv, signal, providerContext: makeCtx(pv === 'drive') })
 }
 
 export async function searchPosts({ providerValue: pv, searchQuery, page, signal }) {
-  if (pv === 'drive') return driveSearch({ searchQuery, signal })
   const mod = runModule(await loadModule(pv, 'posts'))
   if (typeof mod.getSearchPosts !== 'function') throw new Error('no getSearchPosts')
-  return mod.getSearchPosts({ searchQuery, page, providerValue: pv, signal, providerContext: makeCtx() })
+  return mod.getSearchPosts({ searchQuery, page, providerValue: pv, signal, providerContext: makeCtx(pv === 'drive') })
 }
 
 export async function getMeta({ providerValue: pv, link }) {
@@ -459,13 +365,9 @@ export async function getMeta({ providerValue: pv, link }) {
 }
 
 export async function getStream({ providerValue: pv, link, type, signal }) {
-  if (pv === 'drive') {
-    const streams = await driveGetStream({ link, type, signal })
-    return fixStreams(streams, pv)
-  }
   const mod = runModule(await loadModule(pv, 'stream'))
   if (typeof mod.getStream !== 'function') throw new Error('no getStream')
-  const raw = await mod.getStream({ link, type, signal, providerContext: makeCtx(false) })
+  const raw = await mod.getStream({ link, type, signal, providerContext: makeCtx(pv === 'drive') })
   return fixStreams(raw, pv)
 }
 
@@ -478,6 +380,5 @@ export async function getEpisodes({ providerValue: pv, url }) {
 }
 
 export async function installProvider(pv) {
-  if (pv === 'drive') return
   await Promise.all(['catalog', 'posts', 'meta', 'stream'].map(m => loadModule(pv, m)))
 }
