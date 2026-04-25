@@ -4,6 +4,8 @@ const MANIFEST_URL  = 'https://raw.githubusercontent.com/Zenda-Cross/vega-provid
 const MODULES_BASE  = 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main/dist'
 const BASE_URL_JSON = 'https://himanshu8443.github.io/providers/modflix.json'
 const DRIVE_BASE    = 'https://new2.moviesdrives.my/'
+// Rive base URL — not in modflix.json, hardcoded from vega app source
+const RIVE_BASE     = 'https://rivestream.live'
 
 const PROXIES = [
   u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
@@ -13,22 +15,24 @@ const PROXIES = [
 
 const moduleCache = new Map()
 
-// ── KEY FIX: Race all proxies in PARALLEL — use whichever responds first ──
-// Previously proxies were tried sequentially: if corsproxy.io took 60s to
-// timeout, we'd wait 60s before trying allorigins. Now all 3 fire at once.
+// ── Race all proxies in PARALLEL — fastest wins ───────────────────────────
 async function proxyFetch(url, opts = {}) {
   const { signal, ...rest } = opts
-  return Promise.any(
-    PROXIES.map(p =>
-      fetch(p(url), { ...rest, signal }).then(r => {
-        if (!r.ok) throw new Error(`${r.status}`)
-        return r
-      })
+  try {
+    return await Promise.any(
+      PROXIES.map(p =>
+        fetch(p(url), { ...rest, signal }).then(r => {
+          if (!r.ok) throw new Error(`${r.status}`)
+          return r
+        })
+      )
     )
-  ).catch(() => { throw new Error(`All proxies failed: ${url}`) })
+  } catch {
+    throw new Error(`All proxies failed: ${url}`)
+  }
 }
 
-// smartFetch: try direct first (no-op cost if CORS fails fast), then race proxies
+// smartFetch: direct first (fast for GitHub/CDN), proxy fallback for CORS-blocked sites
 async function smartFetch(url, opts = {}) {
   try {
     const r = await fetch(url, { ...opts, mode: 'cors' })
@@ -37,12 +41,23 @@ async function smartFetch(url, opts = {}) {
   return proxyFetch(url, opts)
 }
 
+// resolveUrl: follows redirects via proxy and returns final URL
+// Used instead of fetch(url, {redirect:"manual"}) which doesn't work in browser
+async function resolveUrl(url, opts = {}) {
+  try {
+    const r = await proxyFetch(url, { ...opts, method: 'GET' })
+    // After proxy follows redirects, r.url is the final URL
+    return r.url || url
+  } catch { return url }
+}
+
 const getText = async (url, o) => (await smartFetch(url, o)).text()
 const getJSON = async (url, o) => (await smartFetch(url, o)).json()
 
 // ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(key) {
-  if (key === 'drive') return DRIVE_BASE   // always use hardcoded URL for drive
+  if (key === 'drive') return DRIVE_BASE
+  if (key === 'rive')  return RIVE_BASE   // BUG FIX: rive not in modflix.json
   const c = cacheStorage.getValid(`bu_${key}`)
   if (c) return c
   try {
@@ -74,9 +89,9 @@ async function loadModule(pv, name) {
 }
 
 // ── Module runner ─────────────────────────────────────────────────────────
-// Injects `process` and patched `fetch` so all provider fetch() calls
-// go through our proxy automatically — this is the key fix for drive posts
-function runModule(code) {
+// KEY: inject process.env.CORS_PRXY so getRiveStream uses our proxy
+// KEY: inject patched fetch so all fetch() calls inside modules go via proxy
+function runModule(code, extraEnv = {}) {
   const mod = { exports: {} }
   try {
     // eslint-disable-next-line no-new-func
@@ -89,8 +104,26 @@ function runModule(code) {
     return fn(
       mod.exports, mod, console, Promise, Object,
       setTimeout, clearTimeout, setInterval, clearInterval,
-      { env: { CORS_PRXY: '', NODE_ENV: 'production' } },
-      (u, o = {}) => smartFetch(u, o)   // patched fetch injected here
+      {
+        env: {
+          // BUG FIX: provide CORS_PRXY so getRiveStream prepends proxy to rive URLs
+          CORS_PRXY: PROXIES[0]('').replace('=', '='),
+          NODE_ENV: 'production',
+          ...extraEnv,
+        }
+      },
+      // BUG FIX: patched fetch — all fetch() calls inside module use smartFetch
+      // This means hubcloudExtractor's fetch(vcloudLink) also goes via proxy
+      (u, o = {}) => {
+        // BUG FIX: intercept redirect:"manual" calls
+        // Original: fetch(link, {redirect:"manual"}) to read Location header
+        // Browser: returns opaque response, Location = null → broken
+        // Fix: use proxyFetch which follows redirects server-side
+        if (o.redirect === 'manual' || o.method === 'HEAD') {
+          return proxyFetch(u, { ...o, redirect: 'follow', method: 'GET' })
+        }
+        return smartFetch(u, o)
+      }
     ) || mod.exports
   } catch (e) {
     console.warn('[runModule]', e.message)
@@ -121,12 +154,15 @@ function cheerioLoad(html) {
         find:     s  => { try { return wrap(arr.flatMap(n => [...(n.querySelectorAll?.(s) || [])])) } catch { return wrap([]) } },
         filter:   fn => {
           if (typeof fn === 'function') return wrap(arr.filter((n, i) => fn(i, n)))
-          return wrap(arr.filter(n => { try { return n.matches?.(fn) } catch { return false } }))
+          if (typeof fn === 'string') return wrap(arr.filter(n => { try { return n.matches?.(fn) } catch { return false } }))
+          return o
         },
         not:      s  => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
         parent:   () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
         parents:  s  => {
-          const r = []; arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } }); return wrap(r)
+          const r = []
+          arr.forEach(n => { let p = n.parentElement; while (p) { if (!s || p.matches?.(s)) r.push(p); p = p.parentElement } })
+          return wrap(r)
         },
         children: s  => wrap(arr.flatMap(n => [...(s ? (n.querySelectorAll?.(':scope > ' + s) || []) : (n.children || []))])),
         next:     () => wrap(arr.map(n => n.nextElementSibling).filter(Boolean)),
@@ -142,19 +178,29 @@ function cheerioLoad(html) {
       return o
     }
 
+    // BUG FIX: :contains() polyfill — querySelectorAll doesn't support it
+    // drive/stream.js uses: $('a:contains("HubCloud")').attr('href')
     function $(sel) {
       if (!sel) return wrap([])
       if (typeof sel !== 'string') return wrap([sel].flat().filter(Boolean))
-      // :contains() polyfill — querySelectorAll doesn't support it
+
       if (sel.includes(':contains(')) {
-        const m = sel.match(/^([\w\s,.*#[\]"'=-]*?):contains\(["']([^"']+)["']\)\s*([\s\S]*)$/)
+        // Parse :contains() — handle both single and double quotes
+        const m = sel.match(/^(.*?):contains\(["']([^"']+)["']\)\s*(.*)$/)
         if (m) {
           const [, base, text, after] = m
-          const pool = base.trim() ? [...doc.querySelectorAll(base.trim())] : [...doc.querySelectorAll('*')]
+          const baseStr = base.trim()
+          const pool = baseStr
+            ? [...doc.querySelectorAll(baseStr)]
+            : [...doc.querySelectorAll('*')]
           const matched = pool.filter(el => el.textContent?.includes(text))
-          return after.trim() ? wrap(matched.flatMap(el => [...(el.querySelectorAll(after.trim()) || [])])) : wrap(matched)
+          if (after.trim()) {
+            return wrap(matched.flatMap(el => [...(el.querySelectorAll(after.trim()) || [])]))
+          }
+          return wrap(matched)
         }
       }
+
       try { return wrap([...doc.querySelectorAll(sel)]) } catch { return wrap([]) }
     }
 
@@ -191,9 +237,11 @@ function makeAxios(forceProxy = false) {
     const r = await doFetch(fu, { method, headers: hdrs, body: bs, signal })
     const txt = await r.text()
     let data; try { data = JSON.parse(txt) } catch { data = txt }
-    return { data, status: r.status, statusText: r.statusText,
-             headers: Object.fromEntries(r.headers.entries()),
-             request: { responseURL: r.url } }
+    return {
+      data, status: r.status, statusText: r.statusText,
+      headers: Object.fromEntries(r.headers.entries()),
+      request: { responseURL: r.url }
+    }
   }
   const ax = async (u, c) => req(u, c)
   ax.get    = (u, c = {})     => req(u, { ...c, method: 'GET' })
@@ -201,92 +249,21 @@ function makeAxios(forceProxy = false) {
   ax.put    = (u, d, c = {}) => req(u, { ...c, method: 'PUT',  data: d })
   ax.delete = (u, c = {})     => req(u, { ...c, method: 'DELETE' })
   ax.head   = async (u, c = {}) => {
+    // BUG FIX: axios.head() used by drive for redirect resolution
+    // Instead of HEAD (blocked), GET via proxy and return final URL
     try {
-      const r = await doFetch(u, { ...c, method: 'HEAD' })
-      return { status: r.status, headers: Object.fromEntries(r.headers.entries()), request: { responseURL: r.url } }
+      const r = await proxyFetch(u, { signal: c.signal, method: 'GET' })
+      return {
+        status: r.status,
+        headers: Object.fromEntries(r.headers.entries()),
+        request: { responseURL: r.url }
+      }
     } catch { return { status: 0, headers: {}, request: { responseURL: u } } }
   }
   ax.create = (d = {}) => { const i = makeAxios(forceProxy); i._defaults = d; return i }
   ax.defaults = { headers: { common: {} } }
   ax.interceptors = { request: { use: () => {}, eject: () => {} }, response: { use: () => {}, eject: () => {} } }
   return ax
-}
-
-// ── hubcloud extractor — browser-safe ─────────────────────────────────────
-// Original uses fetch(link, {redirect:"manual"}) to read Location header.
-// Browsers CANNOT read Location header from opaque redirect responses.
-// Fix: use proxyFetch which follows redirects server-side on the proxy.
-const CF_COOKIE = 'ext_name=ojplmecpdpgccookcobabopnaifgidhf; xla=s4t'
-
-async function hubcloudExtractor(link, signal, ax, _cheerio, headers) {
-  const hdr = { ...headers, Cookie: CF_COOKIE }
-  const streamLinks = []
-  try {
-    const baseUrl = link.split('/').slice(0, 3).join('/')
-
-    // Step 1: get the vcloud redirect page
-    const vRes  = await ax(link, { headers: hdr, signal })
-    const vHtml = typeof vRes.data === 'string' ? vRes.data : ''
-    const $v    = cheerioLoad(vHtml)
-
-    const urlMatch = vHtml.match(/var\s+url\s*=\s*'([^']+)'/)
-    let vcloudLink
-    if (urlMatch?.[1]) {
-      try { vcloudLink = atob(urlMatch[1].split('r=')[1] || '') } catch { vcloudLink = urlMatch[1] }
-      if (!vcloudLink) vcloudLink = urlMatch[1]
-    }
-    if (!vcloudLink) vcloudLink = $v('.fa-file-download.fa-lg').parent().attr('href') || link
-    if (vcloudLink?.startsWith('/')) vcloudLink = `${baseUrl}${vcloudLink}`
-
-    console.log('[hubcloud] vcloudLink:', vcloudLink)
-
-    // Step 2: get the download buttons page
-    // Use proxyFetch with redirect:follow — proxy follows server-side
-    const vcRes  = await proxyFetch(vcloudLink, { signal })
-    const vcHtml = await vcRes.text()
-    const $      = cheerioLoad(vcHtml)
-
-    const btns = $('.btn-success.btn-lg.h6, .btn-danger, .btn-secondary')
-    for (const el of (btns._nodes || [])) {
-      let href = el.getAttribute('href') || ''
-      if (!href) continue
-
-      if (href.includes('pixeld')) {
-        if (!href.includes('api')) {
-          const token = href.split('/').pop()
-          const base2 = href.split('/').slice(0, -2).join('/')
-          href = `${base2}/api/file/${token}`
-        }
-        streamLinks.push({ server: 'Pixeldrain', link: href, type: 'mkv' })
-      } else if (href.includes('.dev') && !href.includes('/?id=')) {
-        streamLinks.push({ server: 'Cf Worker', link: href, type: 'mkv' })
-      } else if (href.includes('cloudflarestorage')) {
-        streamLinks.push({ server: 'CfStorage', link: href, type: 'mkv' })
-      } else if (href.includes('fastdl') || href.includes('fsl.')) {
-        streamLinks.push({ server: 'FastDl', link: href, type: 'mkv' })
-      } else if (href.includes('hubcdn') && !href.includes('/?id=')) {
-        streamLinks.push({ server: 'HubCdn', link: href, type: 'mkv' })
-      } else if (href.includes('hubcloud') || href.includes('/?id=')) {
-        // Resolve redirect via proxy (proxy follows 301/302 server-side)
-        try {
-          const rr = await proxyFetch(href, { signal })
-          const finalUrl = rr.url || href
-          const resolved = finalUrl.includes('?link=') ? finalUrl.split('?link=')[1] : finalUrl
-          streamLinks.push({ server: 'HubCloud', link: resolved || href, type: 'mkv' })
-        } catch {
-          streamLinks.push({ server: 'HubCloud', link: href, type: 'mkv' })
-        }
-      } else if (href.includes('.mkv') || href.includes('?token=')) {
-        const srv = href.match(/^(?:https?:\/\/)?(?:www\.)?([^/]+)/i)?.[1]?.replace(/\./g, ' ') || 'Unknown'
-        streamLinks.push({ server: srv, link: href, type: 'mkv' })
-      }
-    }
-    console.log('[hubcloud] found streams:', streamLinks.length)
-    return streamLinks
-  } catch (e) {
-    console.error('[hubcloud]', e.message)
-    return []
-  }
 }
 
 // ── provider context ──────────────────────────────────────────────────────
@@ -300,15 +277,16 @@ function makeCtx(forceProxy = false) {
       'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"',
       'sec-ch-ua-mobile': '?0',
       'sec-ch-ua-platform': '"Windows"',
+      'Cookie': 'xla=s4t; ext_name=ojplmecpdpgccookcobabopnaifgidhf',
     },
     Crypto: { randomUUID: () => crypto.randomUUID(), getRandomValues: a => crypto.getRandomValues(a) },
     Aes: { encrypt: async () => '', decrypt: async () => '' },
     extractors: {
-      hubcloudExtracter: hubcloudExtractor,
-      hubcloudExtractor: hubcloudExtractor,
-      gofileExtracter:     async () => ({ link: '', token: '' }),
+      hubcloudExtracter: async () => [],
+      hubcloudExtractor: async () => [],
+      gofileExtracter:   async () => ({ link: '', token: '' }),
       superVideoExtractor: async () => '',
-      gdFlixExtracter:     async () => [],
+      gdFlixExtracter:   async () => [],
     },
   }
 }
@@ -318,8 +296,11 @@ function fixStreams(raw, pv) {
   return (raw || []).filter(s => s?.link).map(s => {
     const t = (s.type || '').toLowerCase()
     const u = (s.link || '').toLowerCase()
+    // mkv/mp4 = direct file, video.src plays it
     if (t === 'mkv' || t === 'mp4' || u.endsWith('.mkv') || u.endsWith('.mp4')) return s
+    // explicit hls
     if (t === 'hls' || t === 'm3u8' || u.includes('.m3u8') || u.includes('/manifest')) return { ...s, type: 'hls' }
+    // autoEmbed webstreamr always returns m3u8 with wrong type field
     if (pv === 'autoEmbed') return { ...s, type: 'hls' }
     return { ...s, type: 'hls' }
   })
@@ -345,8 +326,6 @@ export async function getCatalog(pv) {
 }
 
 export async function getPosts({ providerValue: pv, filter, page, signal }) {
-  // For drive: run the actual module with proxy-patched fetch injected
-  // The module's fetch() calls go through smartFetch (our injected version)
   const mod = runModule(await loadModule(pv, 'posts'))
   if (typeof mod.getPosts !== 'function') throw new Error('no getPosts')
   return mod.getPosts({ filter, page, providerValue: pv, signal, providerContext: makeCtx(pv === 'drive') })
