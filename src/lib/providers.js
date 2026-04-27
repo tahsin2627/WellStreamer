@@ -90,10 +90,34 @@ function runModule(code) {
       setTimeout, clearTimeout, setInterval, clearInterval,
       // process.env.CORS_PRXY used by getRiveStream to prefix API calls
       { env: { CORS_PRXY: PROXY0, NODE_ENV: 'production' } },
-      // Patched fetch — intercepts redirect:manual/HEAD (broken in browser)
+      // Patched fetch — intercepts redirect:manual and HEAD
+      // HubCloud does: fetch(url, {method:"HEAD", redirect:"manual"})
+      // then reads: newLinkRes.status (expects 3xx) and newLinkRes.headers.get("location")
+      // Browser returns opaque response for redirect:manual — location header = null
+      // Fix: use proxy (follows redirects server-side), return fake response
+      // where status=302 and headers.get("location") = final URL
       (u, o = {}) => {
         if (o.redirect === 'manual' || o.method === 'HEAD') {
-          return proxyFetch(u, { signal: o.signal, method: 'GET' })
+          return proxyFetch(u, { signal: o.signal, method: 'GET' }).then(r => {
+            const finalUrl = r.url || u
+            // Return fake Response-like object that mimics redirect:manual response
+            // The stream.js code checks: status>=300 → headers.get("location")
+            // We set status=302 and location=finalUrl so that branch is taken
+            const fakeHeaders = new Headers(r.headers)
+            fakeHeaders.set('location', finalUrl)
+            return new Response(null, {
+              status: 302,
+              statusText: 'Found',
+              headers: fakeHeaders,
+            })
+          }).catch(() => {
+            // If proxy fails, return fake response pointing to original URL
+            return new Response(null, {
+              status: 200,
+              statusText: 'OK',
+              headers: new Headers({ location: u }),
+            })
+          })
         }
         return smartFetch(u, o)
       }
@@ -254,14 +278,17 @@ function makeAxios(forceProxy = false) {
   ax.post   = (u, d, c = {}) => req(u, { ...c, method: 'POST', data: d })
   ax.put    = (u, d, c = {}) => req(u, { ...c, method: 'PUT', data: d })
   ax.delete = (u, c = {})     => req(u, { ...c, method: 'DELETE' })
-  // axios.head() used for redirect resolution — use GET via proxy instead
+  // axios.head() used for redirect resolution — proxy follows redirects server-side
   ax.head   = async (u, c = {}) => {
     try {
       const r = await proxyFetch(u, { signal: c.signal, method: 'GET' })
+      const finalUrl = r.url || u
+      // Return structure that drive/stream.js expects from axios.head():
+      // newLinkRes.request.responseURL = final URL after redirects
       return {
         status: r.status,
         headers: Object.fromEntries(r.headers.entries()),
-        request: { responseURL: r.url }
+        request: { responseURL: finalUrl }
       }
     } catch { return { status: 0, headers: {}, request: { responseURL: u } } }
   }
