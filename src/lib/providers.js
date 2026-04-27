@@ -91,33 +91,36 @@ function runModule(code) {
       // process.env.CORS_PRXY used by getRiveStream to prefix API calls
       { env: { CORS_PRXY: PROXY0, NODE_ENV: 'production' } },
       // Patched fetch — intercepts redirect:manual and HEAD
-      // HubCloud does: fetch(url, {method:"HEAD", redirect:"manual"})
-      // then reads: newLinkRes.status (expects 3xx) and newLinkRes.headers.get("location")
-      // Browser returns opaque response for redirect:manual — location header = null
-      // Fix: use proxy (follows redirects server-side), return fake response
-      // where status=302 and headers.get("location") = final URL
+      // HubCloud redirect chain:
+      //   hubcloud.fi/?id=X -> 302 -> googlevideo.com?link=GCSURL -> GCSURL
+      // Code reads: headers.get("location") then does location.split("?link=")[1]
+      // Browser redirect:manual = opaque response, location always null = broken
+      // Fix: proxy follows redirects, we build fake response with correct location
       (u, o = {}) => {
         if (o.redirect === 'manual' || o.method === 'HEAD') {
           return proxyFetch(u, { signal: o.signal, method: 'GET' }).then(r => {
             const finalUrl = r.url || u
-            // Return fake Response-like object that mimics redirect:manual response
-            // The stream.js code checks: status>=300 → headers.get("location")
-            // We set status=302 and location=finalUrl so that branch is taken
-            const fakeHeaders = new Headers(r.headers)
-            fakeHeaders.set('location', finalUrl)
-            return new Response(null, {
-              status: 302,
-              statusText: 'Found',
-              headers: fakeHeaders,
-            })
-          }).catch(() => {
-            // If proxy fails, return fake response pointing to original URL
-            return new Response(null, {
-              status: 200,
-              statusText: 'OK',
-              headers: new Headers({ location: u }),
-            })
-          })
+            // The drive/stream.js code does location.split("?link=")[1] to get stream URL
+            // If finalUrl already has ?link= (e.g. googlevideo?link=storage_url)
+            // then setting location=finalUrl lets split work correctly
+            // If finalUrl IS the stream URL directly (e.g. googleusercontent or storage),
+            // wrap it so split("?link=")[1] returns the stream URL
+            let locationVal = finalUrl
+            if (!finalUrl.includes('?link=') &&
+                (finalUrl.includes('googleusercontent') ||
+                 finalUrl.includes('storage.google') ||
+                 finalUrl.includes('drive.google') ||
+                 finalUrl.includes('pixeldrain') ||
+                 finalUrl.includes('cloudflarestorage'))) {
+              // Wrap so split("?link=")[1] = finalUrl
+              locationVal = `https://x.com/?link=${finalUrl}`
+            }
+            const fakeHeaders = new Headers()
+            fakeHeaders.set('location', locationVal)
+            return new Response(null, { status: 302, statusText: 'Found', headers: fakeHeaders })
+          }).catch(() =>
+            new Response(null, { status: 200, headers: new Headers({ location: u }) })
+          )
         }
         return smartFetch(u, o)
       }
