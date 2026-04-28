@@ -380,7 +380,27 @@ export async function getMeta({ providerValue: pv, link }) {
 export async function getStream({ providerValue: pv, link, type, signal }) {
   const mod = runModule(await loadModule(pv, 'stream'))
   if (typeof mod.getStream !== 'function') throw new Error('no getStream')
-  const raw = await mod.getStream({ link, type, signal, providerContext: makeCtx(pv === 'drive') })
+
+  // MoviesDrive: meta.js gives links like https://new2.moviesdrives.my/go/?url=HUBCLOUD_URL
+  // stream.js calls axios.get(url) which follows the redirect to hubcloud page
+  // then looks for <meta http-equiv="refresh"> which doesn't exist on hubcloud pages
+  // so redirectUrl="" and hubcloudExtractor never gets called
+  // FIX: resolve the /go/ redirect BEFORE passing to stream.js
+  let resolvedLink = link
+  if (pv === 'drive' && link.includes('/go/')) {
+    try {
+      const r = await proxyFetch(link, { signal, method: 'GET' })
+      const finalUrl = r.url || link
+      if (finalUrl !== link && finalUrl.length > 10) {
+        resolvedLink = finalUrl
+        console.log('[drive] resolved /go/ redirect:', link, '->', resolvedLink)
+      }
+    } catch (e) {
+      console.warn('[drive] redirect resolve failed:', e.message)
+    }
+  }
+
+  const raw = await mod.getStream({ link: resolvedLink, type, signal, providerContext: makeCtx(pv === 'drive') })
   return fixStreams(raw, pv)
 }
 
