@@ -15,7 +15,6 @@ const PROXIES = [
 
 const moduleCache = new Map()
 
-// Race all proxies simultaneously — fastest wins
 async function proxyFetch(url, opts = {}) {
   const { signal, ...rest } = opts
   try {
@@ -28,7 +27,6 @@ async function proxyFetch(url, opts = {}) {
   } catch { throw new Error(`proxyFetch failed: ${url}`) }
 }
 
-// Try direct first (fast for GitHub/CDN), then race proxies
 async function smartFetch(url, opts = {}) {
   try {
     const r = await fetch(url, { ...opts, mode: 'cors' })
@@ -40,7 +38,6 @@ async function smartFetch(url, opts = {}) {
 const getText = async (url, o) => (await smartFetch(url, o)).text()
 const getJSON = async (url, o) => (await smartFetch(url, o)).json()
 
-// ── Base URL ──────────────────────────────────────────────────────────────
 export async function getBaseUrl(key) {
   if (key === 'drive') return DRIVE_BASE
   if (key === 'rive')  return RIVE_BASE
@@ -55,7 +52,6 @@ export async function getBaseUrl(key) {
   } catch { return '' }
 }
 
-// ── Manifest ──────────────────────────────────────────────────────────────
 export async function fetchManifest() {
   const c = cacheStorage.getValid('manifest')
   if (c) return c
@@ -65,7 +61,6 @@ export async function fetchManifest() {
   return d
 }
 
-// ── Module loader ─────────────────────────────────────────────────────────
 async function loadModule(pv, name) {
   const k = `${pv}/${name}`
   if (moduleCache.has(k)) return moduleCache.get(k)
@@ -74,7 +69,6 @@ async function loadModule(pv, name) {
   return code
 }
 
-// ── Module runner ─────────────────────────────────────────────────────────
 function runModule(code) {
   const mod = { exports: {} }
   try {
@@ -88,39 +82,18 @@ function runModule(code) {
     return fn(
       mod.exports, mod, console, Promise, Object,
       setTimeout, clearTimeout, setInterval, clearInterval,
-      // process.env.CORS_PRXY used by getRiveStream to prefix API calls
       { env: { CORS_PRXY: PROXY0, NODE_ENV: 'production' } },
-      // Patched fetch — intercepts redirect:manual and HEAD
-      // HubCloud redirect chain:
-      //   hubcloud.fi/?id=X -> 302 -> googlevideo.com?link=GCSURL -> GCSURL
-      // Code reads: headers.get("location") then does location.split("?link=")[1]
-      // Browser redirect:manual = opaque response, location always null = broken
-      // Fix: proxy follows redirects, we build fake response with correct location
       (u, o = {}) => {
         if (o.redirect === 'manual' || o.method === 'HEAD') {
           return proxyFetch(u, { signal: o.signal, method: 'GET' }).then(r => {
-            const finalUrl = r.url || u
-            // The drive/stream.js code does location.split("?link=")[1] to get stream URL
-            // If finalUrl already has ?link= (e.g. googlevideo?link=storage_url)
-            // then setting location=finalUrl lets split work correctly
-            // If finalUrl IS the stream URL directly (e.g. googleusercontent or storage),
-            // wrap it so split("?link=")[1] returns the stream URL
-            let locationVal = finalUrl
-            if (!finalUrl.includes('?link=') &&
-                (finalUrl.includes('googleusercontent') ||
-                 finalUrl.includes('storage.google') ||
-                 finalUrl.includes('drive.google') ||
-                 finalUrl.includes('pixeldrain') ||
-                 finalUrl.includes('cloudflarestorage'))) {
-              // Wrap so split("?link=")[1] = finalUrl
-              locationVal = `https://x.com/?link=${finalUrl}`
-            }
+            const finalUrl = r.url && r.url !== u ? r.url : u
             const fakeHeaders = new Headers()
-            fakeHeaders.set('location', locationVal)
-            return new Response(null, { status: 302, statusText: 'Found', headers: fakeHeaders })
-          }).catch(() =>
-            new Response(null, { status: 200, headers: new Headers({ location: u }) })
-          )
+            const loc = finalUrl.includes('?link=')
+              ? finalUrl
+              : `https://redirect.dummy/?link=${encodeURIComponent(finalUrl)}`
+            fakeHeaders.set('location', loc)
+            return new Response(null, { status: 302, headers: fakeHeaders })
+          }).catch(() => new Response(null, { status: 200, headers: new Headers() }))
         }
         return smartFetch(u, o)
       }
@@ -130,12 +103,6 @@ function runModule(code) {
     return mod.exports
   }
 }
-
-// ── :contains() selector engine ───────────────────────────────────────────
-// Handles all patterns used by drive/autoEmbed:
-//   'a:contains("HubCloud")'
-//   'a:contains("1080")a:not(:contains("Zip"))'
-//   'h2:contains("Storyline"),h3:contains("Storyline")'
 
 function splitByComma(sel) {
   const parts = []; let depth = 0, cur = ''
@@ -150,8 +117,7 @@ function splitByComma(sel) {
 }
 
 function evalContains(sel, scope) {
-  // Extract base tag, mustInclude texts, mustExclude texts
-  let baseTag = (sel.match(/^([a-z][a-z0-9]*)/i) || [])[1] || '*'
+  const tag = (sel.match(/^([a-z][a-z0-9]*)/i) || [])[1] || '*'
   const must = [], mustNot = []
   const re = /:not\(:contains\(["']([^"']+)["']\)\)|:contains\(["']([^"']+)["']\)/g
   let m
@@ -160,24 +126,23 @@ function evalContains(sel, scope) {
     else if (m[2]) must.push(m[2])
   }
   try {
-    return [...scope.querySelectorAll(baseTag)].filter(el => {
+    return [...scope.querySelectorAll(tag)].filter(el => {
       const t = el.textContent || ''
       return must.every(x => t.includes(x)) && mustNot.every(x => !t.includes(x))
     })
   } catch { return [] }
 }
 
-// ── Cheerio shim ──────────────────────────────────────────────────────────
 function cheerioLoad(html) {
   try {
     const doc = new DOMParser().parseFromString(String(html || ''), 'text/html')
 
-    function wrap(nodes) {
-      const arr = Array.isArray(nodes) ? nodes : Array.from(nodes || [])
+    function wrap(arr) {
+      arr = Array.isArray(arr) ? arr : Array.from(arr || [])
       const o = {
         _nodes: arr, length: arr.length,
         text:     () => arr.map(n => n.textContent || '').join(''),
-        html:     () => arr.map(n => n.innerHTML || '').join(''),
+        html:     () => arr.map(n => n.innerHTML  || '').join(''),
         attr:     a  => arr[0]?.getAttribute?.(a) ?? '',
         val:      () => arr[0]?.value ?? '',
         first:    () => wrap(arr.slice(0, 1)),
@@ -188,10 +153,9 @@ function cheerioLoad(html) {
         each:     fn => { arr.forEach((n, i) => fn(i, n)); return o },
         map:      fn => arr.map((n, i) => fn(i, n)),
         find:     s  => $(s, arr),
-        filter:   fn => {
-          if (typeof fn === 'function') return wrap(arr.filter((n, i) => fn(i, n)))
-          return $(fn, arr)
-        },
+        filter:   fn => typeof fn === 'function'
+          ? wrap(arr.filter((n, i) => fn(i, n)))
+          : $(fn, arr),
         not:      s  => wrap(arr.filter(n => { try { return !n.matches?.(s) } catch { return true } })),
         parent:   () => wrap(arr.map(n => n.parentElement).filter(Boolean)),
         parents:  s  => {
@@ -209,7 +173,6 @@ function cheerioLoad(html) {
         remove:   () => { arr.forEach(n => n.remove()); return o },
         prop:     p  => arr[0]?.[p],
         data:     k  => arr[0]?.dataset?.[k],
-        prev_obj: () => o,
       }
       return o
     }
@@ -217,17 +180,12 @@ function cheerioLoad(html) {
     function $(sel, ctx) {
       if (!sel) return wrap([])
       if (typeof sel !== 'string') return wrap([sel].flat().filter(Boolean))
-
-      // Build a scope object with querySelectorAll
       const scope = ctx
         ? { querySelectorAll: s => ctx.flatMap(n => [...(n.querySelectorAll?.(s) || [])]) }
         : doc
-
       if (!sel.includes(':contains(')) {
         try { return wrap([...scope.querySelectorAll(sel)]) } catch { return wrap([]) }
       }
-
-      // Handle :contains() — split comma list, evaluate each
       const seen = new Set(), all = []
       for (const part of splitByComma(sel)) {
         for (const el of evalContains(part, scope)) {
@@ -253,7 +211,6 @@ function cheerioLoad(html) {
   }
 }
 
-// ── Axios shim ────────────────────────────────────────────────────────────
 function makeAxios(forceProxy = false) {
   const doFetch = forceProxy ? proxyFetch : smartFetch
   const req = async (cfg, extra = {}) => {
@@ -281,17 +238,13 @@ function makeAxios(forceProxy = false) {
   ax.post   = (u, d, c = {}) => req(u, { ...c, method: 'POST', data: d })
   ax.put    = (u, d, c = {}) => req(u, { ...c, method: 'PUT', data: d })
   ax.delete = (u, c = {})     => req(u, { ...c, method: 'DELETE' })
-  // axios.head() used for redirect resolution — proxy follows redirects server-side
   ax.head   = async (u, c = {}) => {
     try {
       const r = await proxyFetch(u, { signal: c.signal, method: 'GET' })
-      const finalUrl = r.url || u
-      // Return structure that drive/stream.js expects from axios.head():
-      // newLinkRes.request.responseURL = final URL after redirects
       return {
         status: r.status,
         headers: Object.fromEntries(r.headers.entries()),
-        request: { responseURL: finalUrl }
+        request: { responseURL: r.url || u }
       }
     } catch { return { status: 0, headers: {}, request: { responseURL: u } } }
   }
@@ -304,7 +257,6 @@ function makeAxios(forceProxy = false) {
   return ax
 }
 
-// ── Provider context ──────────────────────────────────────────────────────
 function makeCtx(forceProxy = false) {
   return {
     axios: makeAxios(forceProxy),
@@ -328,7 +280,6 @@ function makeCtx(forceProxy = false) {
   }
 }
 
-// ── Stream type normalizer ────────────────────────────────────────────────
 function fixStreams(raw, pv) {
   return (raw || []).filter(s => s?.link).map(s => {
     const t = (s.type || '').toLowerCase()
@@ -340,7 +291,6 @@ function fixStreams(raw, pv) {
   })
 }
 
-// ── Drive catalog (hardcoded) ─────────────────────────────────────────────
 const DRIVE_CATALOG = [
   { title: 'Latest',       filter: '' },
   { title: 'Bollywood',    filter: 'category/bollywood/' },
@@ -352,7 +302,6 @@ const DRIVE_CATALOG = [
   { title: '4K',           filter: 'category/2160p-4k/' },
 ]
 
-// ── Public API ────────────────────────────────────────────────────────────
 export async function getCatalog(pv) {
   if (pv === 'drive') return { catalog: DRIVE_CATALOG, genres: [] }
   const mod = runModule(await loadModule(pv, 'catalog'))
@@ -381,22 +330,20 @@ export async function getStream({ providerValue: pv, link, type, signal }) {
   const mod = runModule(await loadModule(pv, 'stream'))
   if (typeof mod.getStream !== 'function') throw new Error('no getStream')
 
-  // MoviesDrive: meta.js gives links like https://new2.moviesdrives.my/go/?url=HUBCLOUD_URL
-  // stream.js calls axios.get(url) which follows the redirect to hubcloud page
-  // then looks for <meta http-equiv="refresh"> which doesn't exist on hubcloud pages
-  // so redirectUrl="" and hubcloudExtractor never gets called
-  // FIX: resolve the /go/ redirect BEFORE passing to stream.js
+  // Drive meta.js gives /go/?url=BASE64 redirect links
+  // stream.js checks if URL contains "hubcloud"/"gdflix" but /go/ links don't
+  // Fix: resolve the redirect first so stream.js sees the real destination URL
   let resolvedLink = link
   if (pv === 'drive' && link.includes('/go/')) {
     try {
-      const r = await proxyFetch(link, { signal, method: 'GET' })
+      const r = await proxyFetch(link, { signal })
       const finalUrl = r.url || link
-      if (finalUrl !== link && finalUrl.length > 10) {
+      if (finalUrl && finalUrl !== link && !finalUrl.includes('/go/')) {
         resolvedLink = finalUrl
-        console.log('[drive] resolved /go/ redirect:', link, '->', resolvedLink)
+        console.log('[drive] /go/ resolved to:', finalUrl.slice(0, 80))
       }
     } catch (e) {
-      console.warn('[drive] redirect resolve failed:', e.message)
+      console.warn('[drive] resolve /go/ failed:', e.message)
     }
   }
 
